@@ -1,3 +1,4 @@
+# FINAL_UBUNTU20_COMPAT_LINUX_AMD64_NO_LINUX_UPDATER_V2
 name: Throne Linux amd64 build
 
 on:
@@ -18,21 +19,24 @@ jobs:
   build-go:
     permissions:
       contents: read
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:20.04
     strategy:
+      fail-fast: false
       matrix:
         include:
           - cross_os: linux
             cross_arch: amd64
             go_version: "1.26.3"
-      fail-fast: false
-    runs-on: ubuntu-22.04
-    container:
-      image: ubuntu:20.04
     env:
       DEBIAN_FRONTEND: noninteractive
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
       DEST: ${{ github.workspace }}/deployment/${{ matrix.cross_os }}-${{ matrix.cross_arch }}
+      CRONET_GO_DIR: ${{ github.workspace }}/.cronet-go
     steps:
-      - name: Prepare Ubuntu 20.04 build container
+      - name: Prepare Ubuntu 20.04 container
         shell: bash
         run: |
           set -xeuo pipefail
@@ -41,41 +45,50 @@ jobs:
             bash \
             ca-certificates \
             curl \
-            git \
-            unzip \
-            xz-utils \
-            zstd \
-            tar \
             file \
+            git \
+            gnupg \
             build-essential \
             pkg-config \
-            python3
+            python3 \
+            python3-requests \
+            tar \
+            unzip \
+            xz-utils \
+            zstd
           rm -rf /var/lib/apt/lists/*
 
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
+
+      - name: Mark checkout as safe for Git inside container
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$(pwd)"
 
       - name: Cache Common Download
         id: cache-common
         uses: actions/cache@v4.2.3
         with:
           path: artifacts.tgz
-          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/*') }}-${{ matrix.go_version }}-ubuntu2004
+          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/**', 'go.work', 'go.work.sum') }}-${{ matrix.go_version }}-ubuntu2004-no-linux-updater-v1
 
-      - name: Install Go and Protoc in Ubuntu 20.04 container
+      - name: Install Golang
         if: steps.cache-common.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          curl -fsSL "https://go.dev/dl/go${{ matrix.go_version }}.linux-amd64.tar.gz" -o /tmp/go.tgz
-          tar -C /usr/local -xzf /tmp/go.tgz
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
-          export PATH="/usr/local/go/bin:$PATH"
+        uses: actions/setup-go@v5.5.0
+        with:
+          go-version: ${{ matrix.go_version }}
+          cache-dependency-path: |
+            core/server/go.sum
 
-          curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protoc-31.1-linux-x86_64.zip" -o /tmp/protoc.zip
-          unzip -q /tmp/protoc.zip -d /usr/local
-          protoc --version
-          go version
+      - name: Install Protoc
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "31.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Installing protoc-gen-go
         if: steps.cache-common.outputs.cache-hit != 'true'
@@ -84,25 +97,77 @@ jobs:
           set -xeuo pipefail
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Clone cronet-go
         if: steps.cache-common.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -xeuo pipefail
-          git init ~/cronet-go
-          git -C ~/cronet-go remote add origin https://github.com/parhelia512/cronet-go.git
-          git -C ~/cronet-go fetch --depth=1 origin "9ed95366ae2f9b4b994cf54f8f9de0d8bc350057"
-          git -C ~/cronet-go checkout FETCH_HEAD
-          git -C ~/cronet-go submodule update --init --recursive --depth=1
+          rm -rf "$CRONET_GO_DIR"
+          mkdir -p "$CRONET_GO_DIR"
+          git init "$CRONET_GO_DIR"
+          git -C "$CRONET_GO_DIR" remote add origin https://github.com/parhelia512/cronet-go.git
+          git -C "$CRONET_GO_DIR" fetch --depth=1 origin "9ed95366ae2f9b4b994cf54f8f9de0d8bc350057"
+          git -C "$CRONET_GO_DIR" checkout FETCH_HEAD
+          git -C "$CRONET_GO_DIR" submodule update --init --recursive --depth=1
+
+      - name: Patch Chromium sysroot script for Ubuntu 20.04 Python
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          python3 --version
+
+          mapfile -t SYSROOT_CREATORS < <(find "$CRONET_GO_DIR" -path '*/build/linux/sysroot_scripts/sysroot_creator.py' -type f -print)
+
+          if [ "${#SYSROOT_CREATORS[@]}" -eq 0 ]; then
+            echo "No sysroot_creator.py found under: $CRONET_GO_DIR"
+            find "$CRONET_GO_DIR" -type f -path '*sysroot*' -print || true
+            exit 1
+          fi
+
+          SYSROOT_CREATORS_STR="$(printf '%s\n' "${SYSROOT_CREATORS[@]}")" python3 - <<'PY_PATCH'
+          import os
+          from pathlib import Path
+
+          marker = "from __future__ import annotations\n"
+
+          for raw_path in os.environ["SYSROOT_CREATORS_STR"].splitlines():
+              p = Path(raw_path)
+              text = p.read_text()
+
+              if marker not in text:
+                  lines = text.splitlines(keepends=True)
+                  insert_at = 0
+
+                  if lines and lines[0].startswith("#!"):
+                      insert_at = 1
+
+                  while insert_at < len(lines) and (
+                      lines[insert_at].startswith("#") or lines[insert_at].strip() == ""
+                  ):
+                      insert_at += 1
+
+                  lines.insert(insert_at, marker)
+                  p.write_text("".join(lines))
+
+              print(f"patched: {p}")
+          PY_PATCH
+
+          for f in "${SYSROOT_CREATORS[@]}"; do
+            python3 -m py_compile "$f"
+          done
 
       - name: Download Chromium toolchain
         if: steps.cache-common.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -xeuo pipefail
-          cd ~/cronet-go
+          python3 - <<'PY_CHECK'
+          import requests
+          print('python requests:', requests.__version__)
+          PY_CHECK
+          cd "$CRONET_GO_DIR"
           go run ./cmd/build-naive --target=linux/${{ matrix.cross_arch }} download-toolchain
 
       - name: Set Chromium toolchain environment
@@ -110,7 +175,7 @@ jobs:
         shell: bash
         run: |
           set -xeuo pipefail
-          cd ~/cronet-go
+          cd "$CRONET_GO_DIR"
           go run ./cmd/build-naive --target=linux/${{ matrix.cross_arch }} env >> "$GITHUB_ENV"
 
       - name: Build golang parts
@@ -119,6 +184,41 @@ jobs:
         run: |
           set -xeuo pipefail
           GOOS=${{ matrix.cross_os }} GOARCH=${{ matrix.cross_arch }} ./script/build_go.sh
+
+      - name: Check Go artifact GLIBC compatibility
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          bad=0
+          : > glibc-required-go.txt
+          : > glibc-offenders-go.txt
+
+          if [ -d "$DEST" ]; then
+            while IFS= read -r -d '' file; do
+              if file "$file" | grep -q 'ELF'; then
+                versions="$(readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true)"
+                if [ -n "$versions" ]; then
+                  printf '%s\n' "$versions" >> glibc-required-go.txt
+                fi
+                if printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' >/dev/null; then
+                  {
+                    echo "OFFENDER: $file"
+                    printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)'
+                    echo
+                  } | tee -a glibc-offenders-go.txt
+                  bad=1
+                fi
+              fi
+            done < <(find "$DEST" -type f -print0)
+          fi
+
+          sort -Vu glibc-required-go.txt | tee glibc-required-go.sorted.txt
+          if [ "$bad" -ne 0 ]; then
+            echo "Go artifact contains GLIBC requirements newer than Ubuntu 20.04 glibc 2.31."
+            cat glibc-offenders-go.txt
+            exit 1
+          fi
 
       - name: Tar files
         if: steps.cache-common.outputs.cache-hit != 'true'
@@ -136,25 +236,26 @@ jobs:
       contents: read
     needs:
       - build-go
-    strategy:
-      matrix:
-        include:
-          - platform: ubuntu-22.04
-            qt_version: "6.11.1"
-            target: x86_64
-            dest_suffix: linux-amd64
-      fail-fast: false
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-22.04
     container:
       image: ubuntu:20.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - qt_version: "6.5.3"
+            target: x86_64
+            dest_suffix: linux-amd64
     env:
       DEBIAN_FRONTEND: noninteractive
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
       INPUT_VERSION: ${{ github.event.inputs.tag }}
       DEST: ${{ github.workspace }}/deployment/${{ matrix.dest_suffix }}
       DEST_SUFFIX: ${{ matrix.dest_suffix }}
       ARCH: ${{ matrix.target }}
     steps:
-      - name: Prepare Ubuntu 20.04 build container
+      - name: Prepare Ubuntu 20.04 container
         shell: bash
         run: |
           set -xeuo pipefail
@@ -163,26 +264,42 @@ jobs:
             bash \
             ca-certificates \
             curl \
+            file \
             git \
-            unzip \
+            wget \
+            zip \
+            tar \
             xz-utils \
             zstd \
-            tar \
-            file \
             build-essential \
             pkg-config \
+            gcc-10 \
+            g++-10 \
             python3 \
+            python3-dev \
             python3-pip \
+            python3-setuptools \
+            python3-wheel \
+            libfuse2 \
+            patchelf \
+            binutils \
             libgl1-mesa-dev \
             libglx-dev \
+            libegl1-mesa-dev \
             libxkbcommon-dev \
-            libxkbcommon-x11-0 \
+            libxkbcommon-x11-dev \
+            libfontconfig1 \
+            libfontconfig1-dev \
+            libfreetype6 \
+            libfreetype6-dev \
+            libdbus-1-3 \
+            libdbus-1-dev \
             libxcb1 \
             libxcb1-dev \
             libxcb-cursor0 \
             libxcb-cursor-dev \
-            libxcb-glx0 \
-            libxcb-glx0-dev \
+            libxcb-util1 \
+            libxcb-util-dev \
             libxcb-icccm4 \
             libxcb-icccm4-dev \
             libxcb-image0 \
@@ -191,8 +308,6 @@ jobs:
             libxcb-keysyms1-dev \
             libxcb-randr0 \
             libxcb-randr0-dev \
-            libxcb-render0 \
-            libxcb-render0-dev \
             libxcb-render-util0 \
             libxcb-render-util0-dev \
             libxcb-shape0 \
@@ -201,63 +316,160 @@ jobs:
             libxcb-shm0-dev \
             libxcb-sync1 \
             libxcb-sync-dev \
-            libxcb-util1 \
-            libxcb-util-dev \
             libxcb-xfixes0 \
             libxcb-xfixes0-dev \
-            libxcb-xinerama0 \
-            libxcb-xinerama0-dev \
             libxcb-xkb1 \
-            libxcb-xkb-dev
+            libxcb-xkb-dev \
+            libx11-xcb1 \
+            libx11-xcb-dev
           rm -rf /var/lib/apt/lists/*
-          python3 -m pip install --upgrade pip
-          python3 -m pip install --upgrade cmake ninja aqtinstall
 
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
         with:
           submodules: "recursive"
 
-      - name: Download Go Artifacts
+      - name: Mark checkout as safe for Git inside container
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$(pwd)"
+
+      - name: Download Artifacts
         uses: actions/download-artifact@v4.3.0
         with:
           path: download-artifact
+
+      - name: Install CMake, Ninja, and aqtinstall
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          python3 --version
+          python3 - <<'PY_CHECK'
+          import sysconfig
+          from pathlib import Path
+          include_dir = Path(sysconfig.get_paths()["include"])
+          python_h = include_dir / "Python.h"
+          print("Python include:", include_dir)
+          if not python_h.exists():
+              raise SystemExit(f"Missing Python.h at {python_h}. Install python3-dev.")
+          PY_CHECK
+          python3 -m pip install --no-cache-dir --upgrade "pip<25"
+          python3 -m pip install --no-cache-dir --upgrade cmake ninja
+          python3 -m pip install --no-cache-dir --upgrade "aqtinstall<3.2"
+          cmake --version
+          ninja --version
+          aqt version
 
       - name: Install Qt inside Ubuntu 20.04 container
         shell: bash
         run: |
           set -xeuo pipefail
-          aqt install-qt linux desktop "${{ matrix.qt_version }}" gcc_64 -O /opt/Qt
-          QT_ROOT="/opt/Qt/${{ matrix.qt_version }}/gcc_64"
+
+          echo "Available Qt architectures for ${{ matrix.qt_version }}:"
+          aqt list-qt linux desktop --arch "${{ matrix.qt_version }}" \
+            | tr ' ' '\n' \
+            | sed '/^$/d' \
+            | tee /tmp/qt-arches.txt
+
+          if grep -qx 'gcc_64' /tmp/qt-arches.txt; then
+            QT_AQT_ARCH='gcc_64'
+          elif grep -qx 'linux_gcc_64' /tmp/qt-arches.txt; then
+            QT_AQT_ARCH='linux_gcc_64'
+          else
+            echo 'No supported Linux x86_64 Qt architecture was found.'
+            cat /tmp/qt-arches.txt
+            exit 1
+          fi
+
+          echo "Using Qt architecture: $QT_AQT_ARCH"
+          aqt install-qt linux desktop "${{ matrix.qt_version }}" "$QT_AQT_ARCH" -O /opt/Qt
+
+          QT_QMAKE="$(find "/opt/Qt/${{ matrix.qt_version }}" -type f -path '*/bin/qmake' | head -n 1)"
+          if [ -z "$QT_QMAKE" ]; then
+            echo 'qmake was not found after Qt installation. Installed tree:'
+            find /opt/Qt -maxdepth 4 -type d -print
+            exit 1
+          fi
+
+          QT_ROOT="$(dirname "$(dirname "$QT_QMAKE")")"
+          echo "QT_ROOT=$QT_ROOT"
+          "$QT_QMAKE" --version
+
+          if [ ! -d "$QT_ROOT/lib/cmake" ]; then
+            echo "Qt CMake package directory not found at: $QT_ROOT/lib/cmake"
+            find "$QT_ROOT" -maxdepth 3 -type d -print
+            exit 1
+          fi
+
+          ldd "$QT_ROOT/lib/libQt6Gui.so.6" | tee /tmp/qtgui-ldd.txt
+          ldd "$QT_ROOT/lib/libQt6DBus.so.6" | tee /tmp/qtdbus-ldd.txt
+          if grep -q 'not found' /tmp/qtgui-ldd.txt /tmp/qtdbus-ldd.txt; then
+            echo "Qt has unresolved runtime dependencies inside the Ubuntu 20.04 container."
+            exit 1
+          fi
+
           echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=$QT_ROOT/lib/cmake" >> "$GITHUB_ENV"
+          echo "QT_PLUGIN_PATH=$QT_ROOT/plugins" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$QT_ROOT/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Linux - Generate MakeFile and Build
         shell: bash
         run: |
           set -xeuo pipefail
+
+          export CC=/usr/bin/gcc-10
+          export CXX=/usr/bin/g++-10
+          "$CC" --version
+          "$CXX" --version
+
           mkdir build
           cd build
           curl -fLso srslist.h "https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h"
-          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" ..
+          cmake -GNinja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=/usr/bin/gcc-10 \
+            -DCMAKE_CXX_COMPILER=/usr/bin/g++-10 \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+            ..
           ninja
           cd ..
           ./script/deploy_linux64.sh
 
-      - name: Verify binary does not require newer glibc than Ubuntu 20.04
+      - name: Check final Linux package GLIBC compatibility
         shell: bash
         run: |
           set -xeuo pipefail
+          bad=0
+          : > glibc-required.txt
+          : > glibc-offenders.txt
+
           if [ -d "$DEST" ]; then
-            find "$DEST" -type f -print0 | while IFS= read -r -d '' file; do
+            while IFS= read -r -d '' file; do
               if file "$file" | grep -q 'ELF'; then
-                readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' || true
+                versions="$(readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true)"
+                if [ -n "$versions" ]; then
+                  printf '%s\n' "$versions" >> glibc-required.txt
+                fi
+                if printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' >/dev/null; then
+                  {
+                    echo "OFFENDER: $file"
+                    printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)'
+                    echo
+                  } | tee -a glibc-offenders.txt
+                  bad=1
+                fi
               fi
-            done | sort -Vu | tee glibc-required.txt
-            if grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' glibc-required.txt; then
-              echo "Found GLIBC requirement newer than Ubuntu 20.04 glibc 2.31"
-              exit 1
-            fi
+            done < <(find "$DEST" -type f -print0)
+          fi
+
+          sort -Vu glibc-required.txt | tee glibc-required.sorted.txt
+          if [ "$bad" -ne 0 ]; then
+            echo "Found GLIBC requirement newer than Ubuntu 20.04 glibc 2.31."
+            cat glibc-offenders.txt
+            exit 1
           fi
 
       - name: Tar files
@@ -271,39 +483,14 @@ jobs:
           path: artifacts.tgz
 
   publish:
-    name: Pack & Publish Release
+    name: Pack & Publish Linux amd64 Release
     runs-on: ubuntu-22.04
-    container:
-      image: ubuntu:20.04
     needs:
       - build-cpp
     permissions:
       contents: write
       actions: read
-    env:
-      DEBIAN_FRONTEND: noninteractive
     steps:
-      - name: Prepare Ubuntu 20.04 packaging container
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            bash \
-            ca-certificates \
-            curl \
-            git \
-            zip \
-            unzip \
-            xz-utils \
-            zstd \
-            tar \
-            file \
-            desktop-file-utils \
-            dpkg-dev \
-            fakeroot
-          rm -rf /var/lib/apt/lists/*
-
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
 
@@ -312,94 +499,47 @@ jobs:
         with:
           path: download-artifact
 
-      - name: Pack Debian and zip packages
-        shell: bash
+      - name: Pack
         run: |
           set -xeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zip ca-certificates curl
           curl -Lo - https://github.com/tcnksm/ghr/releases/download/v0.17.0/ghr_v0.17.0_linux_amd64.tar.gz | tar xzv
           mv ghr*linux_amd64/ghr .
-
-          find . -name artifacts.tgz -print0 | xargs -0 -n1 tar xvzf
-
+          find download-artifact -name artifacts.tgz -print -exec tar xvzf {} \;
           cd deployment
           mkdir -p debug
 
-          bash ../script/pack_debian.sh "${{ github.event.inputs.tag }}" amd64
-          mv Throne.deb "Throne-${{ github.event.inputs.tag }}-debian-amd64.deb"
-          rm -rf Throne
-
-          cp -a linux-amd64 Throne
-          if [ -f Throne/Throne.debug ]; then
-            mv Throne/Throne.debug "debug/Throne-${{ github.event.inputs.tag }}-linux-amd64.debug"
-          fi
-          zip -9 -r "Throne-${{ github.event.inputs.tag }}-linux-amd64.zip" Throne
-          rm -rf Throne
-
-          zip -9 -r debug-symbols.zip debug
-
-      - name: Build optional AppImage
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          cd deployment
-
-          APPDIR="$PWD/AppDir"
-          rm -rf "$APPDIR"
-          mkdir -p "$APPDIR/usr"
-          cp -a linux-amd64/. "$APPDIR/usr/"
-          rm -f "$APPDIR/usr/Throne.debug"
-
-          if [ ! -x "$APPDIR/usr/Throne" ]; then
-            echo "Cannot find executable at $APPDIR/usr/Throne. Adjust this path if your deploy script uses a different layout."
-            exit 1
+          if [ -f linux-amd64/Throne.debug ]; then
+            mv linux-amd64/Throne.debug debug/Throne-${{ github.event.inputs.tag }}-linux-amd64.debug
           fi
 
-          cat > "$APPDIR/Throne.desktop" <<'DESKTOP_EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=Throne
-          Exec=Throne
-          Icon=Throne
-          Categories=Network;
-          Terminal=false
-          DESKTOP_EOF
+          bash ../script/pack_debian.sh ${{ github.event.inputs.tag }} amd64
+          mv Throne.deb Throne-${{ github.event.inputs.tag }}-debian-amd64.deb
+          rm -rf Throne
 
-          cat > "$APPDIR/Throne.svg" <<'SVG_EOF'
-          <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-            <rect width="256" height="256" rx="48" fill="#202020"/>
-            <text x="128" y="154" text-anchor="middle" font-family="Arial, sans-serif" font-size="86" font-weight="700" fill="#ffffff">T</text>
-          </svg>
-          SVG_EOF
+          mv linux-amd64 Throne
+          zip -9 -r Throne-${{ github.event.inputs.tag }}-linux-amd64.zip Throne
+          rm -rf Throne
 
-          curl -fL -o linuxdeploy-x86_64.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
-
-          export APPIMAGE_EXTRACT_AND_RUN=1
-          ./linuxdeploy-x86_64.AppImage \
-            --appdir "$APPDIR" \
-            --executable "$APPDIR/usr/Throne" \
-            --desktop-file "$APPDIR/Throne.desktop" \
-            --icon-file "$APPDIR/Throne.svg" \
-            --output appimage
-
-          mv ./*.AppImage "Throne-${{ github.event.inputs.tag }}-linux-amd64.AppImage"
-          rm -rf "$APPDIR" linuxdeploy-x86_64.AppImage
+          if [ -d debug ] && [ "$(find debug -type f | wc -l)" -gt 0 ]; then
+            zip -9 -r debug-symbols.zip debug
+          fi
 
       - name: Uploading Debug Artifact
+        if: hashFiles('deployment/debug-symbols.zip') != ''
         uses: actions/upload-artifact@v4.6.2
         with:
           name: Debug-${{ github.sha }}
           path: deployment/debug-symbols.zip
 
       - name: Clean Up
-        shell: bash
         run: |
           set -xeuo pipefail
           cd deployment
           rm -rf linux-amd64
-          rm -rf debug*
+          rm -rf debug
+          rm -rf debug-symbols.zip
 
       - name: Uploading Artifact
         uses: actions/upload-artifact@v4.6.2
@@ -409,12 +549,10 @@ jobs:
 
       - name: PreRelease
         if: github.event.inputs.publish == 'p'
-        shell: bash
         run: |
           ./ghr -prerelease -delete -c ${{ github.sha }} -t "${{ github.token }}" -n "${{ github.event.inputs.tag }}" "${{ github.event.inputs.tag }}" deployment
 
       - name: Release
         if: github.event.inputs.publish == 'r'
-        shell: bash
         run: |
           ./ghr -delete -c ${{ github.sha }} -t "${{ github.token }}" -n "${{ github.event.inputs.tag }}" "${{ github.event.inputs.tag }}" deployment
