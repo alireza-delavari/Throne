@@ -1,5 +1,3 @@
-# Linux amd64 only. Runs on ubuntu-22.04 GitHub runner, builds inside ubuntu:20.04 container; uses Qt 6.5.3 and GCC 10 for Ubuntu 20.04-compatible glibc baseline; deploy script is patched for root/container execution and Wayland plugins disabled and per-file glibc diagnostics.
-# Builds inside ubuntu:20.04 and patches Chromium sysroot scripts discovered under naiveproxy/src for Ubuntu 20.04 Python 3.8.
 name: Throne Linux amd64 build
 
 on:
@@ -33,7 +31,6 @@ jobs:
     env:
       DEBIAN_FRONTEND: noninteractive
       DEST: ${{ github.workspace }}/deployment/${{ matrix.cross_os }}-${{ matrix.cross_arch }}
-      CRONET_GO_DIR: ${{ github.workspace }}/.cronet-go
     steps:
       - name: Prepare Ubuntu 20.04 build container
         shell: bash
@@ -52,27 +49,18 @@ jobs:
             file \
             build-essential \
             pkg-config \
-            python3 \
-            python3-requests
+            python3
           rm -rf /var/lib/apt/lists/*
 
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
-
-      - name: Mark checkout as safe for Git inside container
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$(pwd)"
 
       - name: Cache Common Download
         id: cache-common
         uses: actions/cache@v4.2.3
         with:
           path: artifacts.tgz
-          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/*') }}-${{ matrix.go_version }}-ubuntu2004-py38-cronet-find-sysroot-safe-git-updater-rebuild-v7
-
+          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/*') }}-${{ matrix.go_version }}-ubuntu2004
 
       - name: Install Go and Protoc in Ubuntu 20.04 container
         if: steps.cache-common.outputs.cache-hit != 'true'
@@ -103,81 +91,18 @@ jobs:
         shell: bash
         run: |
           set -xeuo pipefail
-          rm -rf "$CRONET_GO_DIR"
-          mkdir -p "$CRONET_GO_DIR"
-          git init "$CRONET_GO_DIR"
-          git -C "$CRONET_GO_DIR" remote add origin https://github.com/parhelia512/cronet-go.git
-          git -C "$CRONET_GO_DIR" fetch --depth=1 origin "9ed95366ae2f9b4b994cf54f8f9de0d8bc350057"
-          git -C "$CRONET_GO_DIR" checkout FETCH_HEAD
-          git -C "$CRONET_GO_DIR" submodule update --init --recursive --depth=1
-
-          echo "CRONET_GO_DIR=$CRONET_GO_DIR"
-          test -d "$CRONET_GO_DIR"
-          find "$CRONET_GO_DIR" -maxdepth 5 -type f -name sysroot_creator.py -print
-
-      - name: Patch Chromium sysroot script for Ubuntu 20.04 Python
-        if: steps.cache-common.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          python3 --version
-
-          mapfile -t SYSROOT_CREATORS < <(find "$CRONET_GO_DIR" -path '*/build/linux/sysroot_scripts/sysroot_creator.py' -type f -print)
-
-          if [ "${#SYSROOT_CREATORS[@]}" -eq 0 ]; then
-            echo "No sysroot_creator.py found under: $CRONET_GO_DIR"
-            echo "Available Python files containing sysroot in their path:"
-            find "$CRONET_GO_DIR" -type f -path '*sysroot*' -print || true
-            exit 1
-          fi
-
-          printf 'Will patch Chromium sysroot script(s):\n'
-          printf '  %s\n' "${SYSROOT_CREATORS[@]}"
-
-          SYSROOT_CREATORS_STR="$(printf '%s\n' "${SYSROOT_CREATORS[@]}")" python3 - <<'PY_PATCH'
-          import os
-          from pathlib import Path
-
-          marker = "from __future__ import annotations\n"
-
-          for raw_path in os.environ["SYSROOT_CREATORS_STR"].splitlines():
-              p = Path(raw_path)
-              text = p.read_text()
-
-              if marker not in text:
-                  lines = text.splitlines(keepends=True)
-                  insert_at = 0
-
-                  if lines and lines[0].startswith("#!"):
-                      insert_at = 1
-
-                  while insert_at < len(lines) and (
-                      lines[insert_at].startswith("#") or lines[insert_at].strip() == ""
-                  ):
-                      insert_at += 1
-
-                  lines.insert(insert_at, marker)
-                  p.write_text("".join(lines))
-
-              print(f"patched: {p}")
-          PY_PATCH
-
-          for f in "${SYSROOT_CREATORS[@]}"; do
-            python3 -m py_compile "$f"
-          done
+          git init ~/cronet-go
+          git -C ~/cronet-go remote add origin https://github.com/parhelia512/cronet-go.git
+          git -C ~/cronet-go fetch --depth=1 origin "9ed95366ae2f9b4b994cf54f8f9de0d8bc350057"
+          git -C ~/cronet-go checkout FETCH_HEAD
+          git -C ~/cronet-go submodule update --init --recursive --depth=1
 
       - name: Download Chromium toolchain
         if: steps.cache-common.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -xeuo pipefail
-          which python3
-          python3 --version
-          python3 - <<'PY_CHECK'
-          import requests
-          print('python requests:', requests.__version__)
-          PY_CHECK
-          cd "$CRONET_GO_DIR"
+          cd ~/cronet-go
           go run ./cmd/build-naive --target=linux/${{ matrix.cross_arch }} download-toolchain
 
       - name: Set Chromium toolchain environment
@@ -185,7 +110,7 @@ jobs:
         shell: bash
         run: |
           set -xeuo pipefail
-          cd "$CRONET_GO_DIR"
+          cd ~/cronet-go
           go run ./cmd/build-naive --target=linux/${{ matrix.cross_arch }} env >> "$GITHUB_ENV"
 
       - name: Build golang parts
@@ -193,137 +118,7 @@ jobs:
         shell: bash
         run: |
           set -xeuo pipefail
-          git status --short || true
           GOOS=${{ matrix.cross_os }} GOARCH=${{ matrix.cross_arch }} ./script/build_go.sh
-
-      - name: Rebuild updater for Ubuntu 20.04 if required
-        if: steps.cache-common.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -xeuo pipefail
-
-          UPDATER="$DEST/updater"
-          if [ ! -f "$UPDATER" ]; then
-            echo "No updater binary found at $UPDATER; skipping updater rebuild."
-            exit 0
-          fi
-
-          echo "Existing updater binary information:"
-          file "$UPDATER" || true
-          go version -m "$UPDATER" || true
-          readelf -W --version-info "$UPDATER" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true
-
-          if ! readelf -W --version-info "$UPDATER" 2>/dev/null \
-              | grep -o 'GLIBC_[0-9][0-9.]*' \
-              | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' >/dev/null; then
-            echo "updater is already compatible with Ubuntu 20.04 glibc <= 2.31."
-            exit 0
-          fi
-
-          echo "updater requires a newer glibc. Trying to rebuild it from source inside Ubuntu 20.04."
-
-          mapfile -t CANDIDATE_DIRS < <(
-            {
-              printf '%s\n' \
-                "$GITHUB_WORKSPACE/core/updater" \
-                "$GITHUB_WORKSPACE/updater" \
-                "$GITHUB_WORKSPACE/cmd/updater" \
-                "$GITHUB_WORKSPACE/core/server/updater" \
-                "$GITHUB_WORKSPACE/cmd/throne-updater"
-              find "$GITHUB_WORKSPACE" \
-                -path "$GITHUB_WORKSPACE/.git" -prune -o \
-                -path "$GITHUB_WORKSPACE/.cronet-go" -prune -o \
-                -type f -name '*.go' -path '*updat*' -printf '%h\n'
-            } | awk 'NF' | sort -u
-          )
-
-          echo "Updater source candidates:"
-          printf '  %s\n' "${CANDIDATE_DIRS[@]:-}"
-
-          rebuilt=0
-          for dir in "${CANDIDATE_DIRS[@]}"; do
-            if [ ! -d "$dir" ]; then
-              continue
-            fi
-
-            if ! find "$dir" -maxdepth 1 -type f -name '*.go' | grep -q .; then
-              continue
-            fi
-
-            if ! grep -R --include='*.go' -q '^package main' "$dir"; then
-              continue
-            fi
-
-            echo "Trying updater build from: $dir"
-            (
-              cd "$dir"
-              go env
-              CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-                go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$UPDATER" .
-            ) && rebuilt=1 && break || true
-
-            echo "Pure-Go updater build failed for $dir; trying Ubuntu 20.04 GCC external build."
-            (
-              cd "$dir"
-              CC=/usr/bin/gcc CXX=/usr/bin/g++ CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
-                go build -trimpath -buildvcs=false -ldflags="-s -w -linkmode external -extldflags '-Wl,--as-needed'" -o "$UPDATER" .
-            ) && rebuilt=1 && break || true
-          done
-
-          if [ "$rebuilt" -ne 1 ]; then
-            echo "Could not rebuild updater automatically. The current updater appears to be a prebuilt binary, or its source path is not one of the detected candidates."
-            echo "Go package candidates containing 'updat' were:"
-            printf '  %s\n' "${CANDIDATE_DIRS[@]:-}"
-            echo "Fix script/build_go.sh so updater is built inside this Ubuntu 20.04 container, or remove/replace the prebuilt updater."
-            exit 1
-          fi
-
-          echo "Rebuilt updater binary information:"
-          file "$UPDATER" || true
-          go version -m "$UPDATER" || true
-          readelf -W --version-info "$UPDATER" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true
-
-          if readelf -W --version-info "$UPDATER" 2>/dev/null \
-              | grep -o 'GLIBC_[0-9][0-9.]*' \
-              | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' >/dev/null; then
-            echo "Updater still requires a newer glibc after rebuild. It cannot be shipped for Ubuntu 20.04 in this form."
-            exit 1
-          fi
-
-      - name: Verify Go artifacts do not require newer glibc than Ubuntu 20.04
-        if: steps.cache-common.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          bad=0
-          : > glibc-required-go.txt
-          : > glibc-offenders-go.txt
-
-          if [ -d "$DEST" ]; then
-            while IFS= read -r -d '' file; do
-              if file "$file" | grep -q 'ELF'; then
-                versions="$(readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true)"
-                if [ -n "$versions" ]; then
-                  printf '%s\n' "$versions" >> glibc-required-go.txt
-                fi
-                if printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' >/dev/null; then
-                  {
-                    echo "OFFENDER: $file"
-                    printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)'
-                    echo
-                  } | tee -a glibc-offenders-go.txt
-                  bad=1
-                fi
-              fi
-            done < <(find "$DEST" -type f -print0)
-          fi
-
-          sort -Vu glibc-required-go.txt | tee glibc-required-go.sorted.txt
-          if [ "$bad" -ne 0 ]; then
-            echo "Go artifact contains GLIBC requirements newer than Ubuntu 20.04 glibc 2.31."
-            cat glibc-offenders-go.txt
-            exit 1
-          fi
 
       - name: Tar files
         if: steps.cache-common.outputs.cache-hit != 'true'
@@ -345,7 +140,7 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            qt_version: "6.5.3"
+            qt_version: "6.11.1"
             target: x86_64
             dest_suffix: linux-amd64
       fail-fast: false
@@ -375,14 +170,9 @@ jobs:
             tar \
             file \
             build-essential \
-            gcc-10 \
-            g++-10 \
             pkg-config \
             python3 \
-            python3-dev \
             python3-pip \
-            python3-setuptools \
-            python3-wheel \
             libgl1-mesa-dev \
             libglx-dev \
             libxkbcommon-dev \
@@ -418,50 +208,15 @@ jobs:
             libxcb-xinerama0 \
             libxcb-xinerama0-dev \
             libxcb-xkb1 \
-            libxcb-xkb-dev \
-            libfontconfig1 \
-            libfontconfig1-dev \
-            libfreetype6 \
-            libfreetype6-dev \
-            libdbus-1-3 \
-            libdbus-1-dev \
-            libfuse2 \
-            patchelf \
-            wget
+            libxcb-xkb-dev
           rm -rf /var/lib/apt/lists/*
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --upgrade cmake ninja aqtinstall
 
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
         with:
           submodules: "recursive"
-
-      - name: Mark checkout as safe for Git inside container
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$(pwd)"
-
-      - name: Install CMake, Ninja, and aqtinstall
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          python3 --version
-          python3 - <<'PY_CHECK'
-          import sysconfig
-          from pathlib import Path
-          include_dir = Path(sysconfig.get_paths()["include"])
-          python_h = include_dir / "Python.h"
-          print("Python include:", include_dir)
-          if not python_h.exists():
-              raise SystemExit(f"Missing Python.h at {python_h}. Install python3-dev.")
-          PY_CHECK
-          python3 -m pip install --no-cache-dir --upgrade "pip<25"
-          python3 -m pip install --no-cache-dir --upgrade cmake ninja
-          python3 -m pip install --no-cache-dir --upgrade "aqtinstall<3.2"
-          cmake --version
-          ninja --version
-          aqt version
 
       - name: Download Go Artifacts
         uses: actions/download-artifact@v4.3.0
@@ -472,203 +227,35 @@ jobs:
         shell: bash
         run: |
           set -xeuo pipefail
-
-          echo "Available Qt architectures for ${{ matrix.qt_version }}:"
-          aqt list-qt linux desktop --arch "${{ matrix.qt_version }}" \
-            | tr ' ' '\n' \
-            | sed '/^$/d' \
-            | tee /tmp/qt-arches.txt
-
-          # aqt can print architectures in a single space-separated line.
-          # Normalize to one architecture per line before testing with grep -qx.
-          if grep -qx 'gcc_64' /tmp/qt-arches.txt; then
-            QT_AQT_ARCH='gcc_64'
-          elif grep -qx 'linux_gcc_64' /tmp/qt-arches.txt; then
-            QT_AQT_ARCH='linux_gcc_64'
-          else
-            echo 'No supported Linux x86_64 Qt architecture was found.'
-            cat /tmp/qt-arches.txt
-            exit 1
-          fi
-
-          echo "Using Qt architecture: $QT_AQT_ARCH"
-          aqt install-qt linux desktop "${{ matrix.qt_version }}" "$QT_AQT_ARCH" -O /opt/Qt
-
-          QT_QMAKE="$(find "/opt/Qt/${{ matrix.qt_version }}" -type f -path '*/bin/qmake' | head -n 1)"
-          if [ -z "$QT_QMAKE" ]; then
-            echo 'qmake was not found after Qt installation. Installed tree:'
-            find /opt/Qt -maxdepth 4 -type d -print
-            exit 1
-          fi
-
-          QT_ROOT="$(dirname "$(dirname "$QT_QMAKE")")"
-          echo "QT_ROOT=$QT_ROOT"
-          "$QT_QMAKE" --version
-
-          if [ ! -d "$QT_ROOT/lib/cmake" ]; then
-            echo "Qt CMake package directory not found at: $QT_ROOT/lib/cmake"
-            find "$QT_ROOT" -maxdepth 3 -type d -print
-            exit 1
-          fi
-
-          echo "Checking Qt shared-library dependencies:"
-          ldd "$QT_ROOT/lib/libQt6Gui.so.6" | tee /tmp/qtgui-ldd.txt
-          ldd "$QT_ROOT/lib/libQt6DBus.so.6" | tee /tmp/qtdbus-ldd.txt
-          if grep -q 'not found' /tmp/qtgui-ldd.txt /tmp/qtdbus-ldd.txt; then
-            echo "Qt has unresolved runtime dependencies inside the Ubuntu 20.04 container."
-            exit 1
-          fi
-
+          aqt install-qt linux desktop "${{ matrix.qt_version }}" gcc_64 -O /opt/Qt
+          QT_ROOT="/opt/Qt/${{ matrix.qt_version }}/gcc_64"
           echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=$QT_ROOT/lib/cmake" >> "$GITHUB_ENV"
-          echo "QT_PLUGIN_PATH=$QT_ROOT/plugins" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$QT_ROOT/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
-
-      - name: Patch Linux deploy script for container execution
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          python3 - <<'PY_PATCH'
-          from pathlib import Path
-
-          p = Path("script/deploy_linux64.sh")
-          text = p.read_text()
-
-          # The GitHub job runs inside ubuntu:20.04 as root. There is no sudo in
-          # the minimal container, and the required packages are already installed
-          # in the container preparation step.
-          remove_lines = {
-              "sudo add-apt-repository universe",
-              "sudo apt install libfuse2",
-              "sudo apt install patchelf",
-              "sudo apt-get install libfuse2",
-              "sudo apt-get install patchelf",
-          }
-
-          lines = []
-          for line in text.splitlines():
-              if line.strip() in remove_lines:
-                  continue
-              lines.append(line)
-
-          text = "\n".join(lines) + "\n"
-
-          if "export APPIMAGE_EXTRACT_AND_RUN=1" not in text:
-              text = text.replace("set -e\n", "set -e\n\nexport APPIMAGE_EXTRACT_AND_RUN=1\n", 1)
-
-          # Do not force Wayland deployment. Qt 6.5.3 gcc_64 provides the XCB
-          # platform plugin, but libqwayland.so may not exist unless qtwayland is
-          # installed and even then the Qt 6 plugin name may differ.
-          text = text.replace(
-              'export EXTRA_QT_PLUGINS="iconengines;wayland-shell-integration;wayland-decoration-client;"',
-              'export EXTRA_QT_PLUGINS="iconengines;"'
-          )
-          text = text.replace(
-              'export EXTRA_PLATFORM_PLUGINS="libqwayland.so;"',
-              'export EXTRA_PLATFORM_PLUGINS=""'
-          )
-
-          # Make the manual plugin copy section tolerate missing optional plugins.
-          replacements = {
-              'cp $QT_PLUGIN_PATH/platforms/libqxcb.so ./usr/plugins/platforms':
-                  'if [ -f "$QT_PLUGIN_PATH/platforms/libqxcb.so" ]; then cp "$QT_PLUGIN_PATH/platforms/libqxcb.so" ./usr/plugins/platforms; fi',
-              'cp $QT_PLUGIN_PATH/platforms/libqwayland.so ./usr/plugins/platforms':
-                  'if [ -f "$QT_PLUGIN_PATH/platforms/libqwayland.so" ]; then cp "$QT_PLUGIN_PATH/platforms/libqwayland.so" ./usr/plugins/platforms; fi\nif [ -f "$QT_PLUGIN_PATH/platforms/libqwayland-generic.so" ]; then cp "$QT_PLUGIN_PATH/platforms/libqwayland-generic.so" ./usr/plugins/platforms; fi\nif [ -f "$QT_PLUGIN_PATH/platforms/libqwayland-egl.so" ]; then cp "$QT_PLUGIN_PATH/platforms/libqwayland-egl.so" ./usr/plugins/platforms; fi',
-              'cp -r $QT_PLUGIN_PATH/platformthemes ./usr/plugins':
-                  'if [ -d "$QT_PLUGIN_PATH/platformthemes" ]; then cp -r "$QT_PLUGIN_PATH/platformthemes" ./usr/plugins; fi',
-              'cp -r $QT_PLUGIN_PATH/imageformats ./usr/plugins':
-                  'if [ -d "$QT_PLUGIN_PATH/imageformats" ]; then cp -r "$QT_PLUGIN_PATH/imageformats" ./usr/plugins; fi',
-              'cp -r $QT_PLUGIN_PATH/iconengines ./usr/plugins':
-                  'if [ -d "$QT_PLUGIN_PATH/iconengines" ]; then cp -r "$QT_PLUGIN_PATH/iconengines" ./usr/plugins; fi',
-              'cp -r $QT_PLUGIN_PATH/wayland-shell-integration ./usr/plugins':
-                  ': # Wayland shell integration intentionally not deployed for Ubuntu 20.04 XCB package',
-              'cp -r $QT_PLUGIN_PATH/wayland-decoration-client ./usr/plugins':
-                  ': # Wayland decoration client intentionally not deployed for Ubuntu 20.04 XCB package',
-              'cp -r $QT_PLUGIN_PATH/tls ./usr/plugins':
-                  'if [ -d "$QT_PLUGIN_PATH/tls" ]; then cp -r "$QT_PLUGIN_PATH/tls" ./usr/plugins; fi',
-              "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqxcb.so":
-                  "if [ -f ./usr/plugins/platforms/libqxcb.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqxcb.so; fi",
-              "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland.so":
-                  "if [ -f ./usr/plugins/platforms/libqwayland.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland.so; fi\nif [ -f ./usr/plugins/platforms/libqwayland-generic.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland-generic.so; fi\nif [ -f ./usr/plugins/platforms/libqwayland-egl.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland-egl.so; fi",
-              "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqgtk3.so":
-                  "if [ -f ./usr/plugins/platformthemes/libqgtk3.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqgtk3.so; fi",
-              "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqxdgdesktopportal.so":
-                  "if [ -f ./usr/plugins/platformthemes/libqxdgdesktopportal.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqxdgdesktopportal.so; fi",
-          }
-          for old, new in replacements.items():
-              text = text.replace(old, new)
-
-          p.write_text(text)
-          print(p.read_text())
-          PY_PATCH
 
       - name: Linux - Generate MakeFile and Build
         shell: bash
         run: |
           set -xeuo pipefail
-
-          # Ubuntu 20.04 defaults to GCC 9.4, whose libstdc++ does not provide <span>.
-          # GCC 10 is still available in Ubuntu 20.04 and provides the C++20 header.
-          export CC=/usr/bin/gcc-10
-          export CXX=/usr/bin/g++-10
-          "$CC" --version
-          "$CXX" --version
-
           mkdir build
           cd build
           curl -fLso srslist.h "https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h"
-          cmake -GNinja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_C_COMPILER=/usr/bin/gcc-10 \
-            -DCMAKE_CXX_COMPILER=/usr/bin/g++-10 \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
-            ..
+          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" ..
           ninja
           cd ..
           ./script/deploy_linux64.sh
-
-      - name: Remove optional Wayland plugins from Linux package
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          # This package targets Ubuntu 20.04 X11/XCB compatibility. Do not ship
-          # optional Wayland plugins from the prebuilt Qt archive unless they pass
-          # the same glibc baseline check.
-          rm -f "$DEST/usr/plugins/platforms"/libqwayland*.so || true
-          rm -rf "$DEST/usr/plugins/wayland-shell-integration" || true
-          rm -rf "$DEST/usr/plugins/wayland-decoration-client" || true
 
       - name: Verify binary does not require newer glibc than Ubuntu 20.04
         shell: bash
         run: |
           set -xeuo pipefail
-          bad=0
-          : > glibc-required.txt
-          : > glibc-offenders.txt
-
           if [ -d "$DEST" ]; then
-            while IFS= read -r -d '' file; do
+            find "$DEST" -type f -print0 | while IFS= read -r -d '' file; do
               if file "$file" | grep -q 'ELF'; then
-                versions="$(readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true)"
-                if [ -n "$versions" ]; then
-                  printf '%s\n' "$versions" >> glibc-required.txt
-                fi
-                if printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' >/dev/null; then
-                  {
-                    echo "OFFENDER: $file"
-                    printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)'
-                    echo
-                  } | tee -a glibc-offenders.txt
-                  bad=1
-                fi
+                readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' || true
               fi
-            done < <(find "$DEST" -type f -print0)
-
-            sort -Vu glibc-required.txt | tee glibc-required.sorted.txt
-            if [ "$bad" -ne 0 ]; then
+            done | sort -Vu | tee glibc-required.txt
+            if grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' glibc-required.txt; then
               echo "Found GLIBC requirement newer than Ubuntu 20.04 glibc 2.31"
-              echo "Offending files:"
-              cat glibc-offenders.txt
               exit 1
             fi
           fi
@@ -719,13 +306,6 @@ jobs:
 
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
-
-      - name: Mark checkout as safe for Git inside container
-        shell: bash
-        run: |
-          set -xeuo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$(pwd)"
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4.3.0
