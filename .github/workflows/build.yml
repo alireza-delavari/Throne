@@ -1,4 +1,7 @@
-name: Throne build matrix
+# Linux amd64 only. Runs on ubuntu-22.04 GitHub runner, builds inside ubuntu:20.04 container; uses Qt 6.5.3 and GCC 10 for Ubuntu 20.04-compatible glibc baseline; deploy script is patched for root/container execution and optional Wayland plugins.
+# Builds inside ubuntu:20.04 and patches Chromium sysroot scripts discovered under naiveproxy/src for Ubuntu 20.04 Python 3.8.
+name: Throne Linux amd64 build
+
 on:
   workflow_dispatch:
     inputs:
@@ -8,9 +11,11 @@ on:
       publish:
         description: "r for normal release, p for prerelease, leave empty to not publish anything"
         required: false
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   build-go:
     permissions:
@@ -18,103 +23,190 @@ jobs:
     strategy:
       matrix:
         include:
-          - cross_os: windows
-            cross_arch: amd64
-            go_version: "1.26.3"
-          - cross_os: windows
-            cross_arch: arm64
-            go_version: "1.26.3"
           - cross_os: linux
             cross_arch: amd64
-            go_version: "1.26.3"
-          - cross_os: linux
-            cross_arch: arm64
-            go_version: "1.26.3"
-          - cross_os: darwin
-            cross_arch: amd64
-            go_version: "1.26.3"
-          - cross_os: darwin
-            cross_arch: arm64
-            go_version: "1.26.3"
-          - cross_os: darwinlegacy
-            cross_arch: amd64
-            go_version: "1.26.3"
-          - cross_os: windowslegacy
-            cross_arch: amd64
-            go_version: "1.26.3"
-          - cross_os: windowslegacy
-            cross_arch: 386
             go_version: "1.26.3"
       fail-fast: false
-    runs-on: ${{ matrix.cross_os == 'linux' && 'ubuntu-22.04' || 'macos-latest' }}
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:20.04
     env:
+      DEBIAN_FRONTEND: noninteractive
       DEST: ${{ github.workspace }}/deployment/${{ matrix.cross_os }}-${{ matrix.cross_arch }}
+      CRONET_GO_DIR: ${{ github.workspace }}/.cronet-go
     steps:
+      - name: Prepare Ubuntu 20.04 build container
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash \
+            ca-certificates \
+            curl \
+            git \
+            unzip \
+            xz-utils \
+            zstd \
+            tar \
+            file \
+            build-essential \
+            pkg-config \
+            python3 \
+            python3-requests
+          rm -rf /var/lib/apt/lists/*
+
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
+
+      - name: Mark checkout as safe for Git inside container
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$(pwd)"
+
       - name: Cache Common Download
         id: cache-common
         uses: actions/cache@v4.2.3
         with:
           path: artifacts.tgz
-          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/*') }}-${{ matrix.go_version }}
-      - name: Install Golang
+          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/*') }}-${{ matrix.go_version }}-ubuntu2004-py38-cronet-find-sysroot-safe-git-v4
+
+
+      - name: Install Go and Protoc in Ubuntu 20.04 container
         if: steps.cache-common.outputs.cache-hit != 'true'
-        uses: actions/setup-go@v5.5.0
-        with:
-          go-version: ${{ matrix.go_version }}
-          cache-dependency-path: |
-            core/server/go.sum
-      - name: Install Golang For Legacy OS
-        if: steps.cache-common.outputs.cache-hit != 'true' && contains( matrix.cross_os, 'legacy' )
+        shell: bash
         run: |
-          curl -L -o go.zip https://github.com/throneproj/env_windows_legacy/releases/download/latest/go.zip
-          7z x go.zip
-      - name: Install Protoc
-        if: steps.cache-common.outputs.cache-hit != 'true'
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "31.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          set -xeuo pipefail
+          curl -fsSL "https://go.dev/dl/go${{ matrix.go_version }}.linux-amd64.tar.gz" -o /tmp/go.tgz
+          tar -C /usr/local -xzf /tmp/go.tgz
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/local/go/bin:$PATH"
+
+          curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protoc-31.1-linux-x86_64.zip" -o /tmp/protoc.zip
+          unzip -q /tmp/protoc.zip -d /usr/local
+          protoc --version
+          go version
+
       - name: Installing protoc-gen-go
         if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
         run: |
+          set -xeuo pipefail
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: Clone cronet-go
-        if: matrix.cross_os == 'linux'
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
         run: |
           set -xeuo pipefail
-          git init ~/cronet-go
-          git -C ~/cronet-go remote add origin https://github.com/parhelia512/cronet-go.git
-          git -C ~/cronet-go fetch --depth=1 origin "9ed95366ae2f9b4b994cf54f8f9de0d8bc350057"
-          git -C ~/cronet-go checkout FETCH_HEAD
-          git -C ~/cronet-go submodule update --init --recursive --depth=1
+          rm -rf "$CRONET_GO_DIR"
+          mkdir -p "$CRONET_GO_DIR"
+          git init "$CRONET_GO_DIR"
+          git -C "$CRONET_GO_DIR" remote add origin https://github.com/parhelia512/cronet-go.git
+          git -C "$CRONET_GO_DIR" fetch --depth=1 origin "9ed95366ae2f9b4b994cf54f8f9de0d8bc350057"
+          git -C "$CRONET_GO_DIR" checkout FETCH_HEAD
+          git -C "$CRONET_GO_DIR" submodule update --init --recursive --depth=1
+
+          echo "CRONET_GO_DIR=$CRONET_GO_DIR"
+          test -d "$CRONET_GO_DIR"
+          find "$CRONET_GO_DIR" -maxdepth 5 -type f -name sysroot_creator.py -print
+
+      - name: Patch Chromium sysroot script for Ubuntu 20.04 Python
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          python3 --version
+
+          mapfile -t SYSROOT_CREATORS < <(find "$CRONET_GO_DIR" -path '*/build/linux/sysroot_scripts/sysroot_creator.py' -type f -print)
+
+          if [ "${#SYSROOT_CREATORS[@]}" -eq 0 ]; then
+            echo "No sysroot_creator.py found under: $CRONET_GO_DIR"
+            echo "Available Python files containing sysroot in their path:"
+            find "$CRONET_GO_DIR" -type f -path '*sysroot*' -print || true
+            exit 1
+          fi
+
+          printf 'Will patch Chromium sysroot script(s):\n'
+          printf '  %s\n' "${SYSROOT_CREATORS[@]}"
+
+          SYSROOT_CREATORS_STR="$(printf '%s\n' "${SYSROOT_CREATORS[@]}")" python3 - <<'PY_PATCH'
+          import os
+          from pathlib import Path
+
+          marker = "from __future__ import annotations\n"
+
+          for raw_path in os.environ["SYSROOT_CREATORS_STR"].splitlines():
+              p = Path(raw_path)
+              text = p.read_text()
+
+              if marker not in text:
+                  lines = text.splitlines(keepends=True)
+                  insert_at = 0
+
+                  if lines and lines[0].startswith("#!"):
+                      insert_at = 1
+
+                  while insert_at < len(lines) and (
+                      lines[insert_at].startswith("#") or lines[insert_at].strip() == ""
+                  ):
+                      insert_at += 1
+
+                  lines.insert(insert_at, marker)
+                  p.write_text("".join(lines))
+
+              print(f"patched: {p}")
+          PY_PATCH
+
+          for f in "${SYSROOT_CREATORS[@]}"; do
+            python3 -m py_compile "$f"
+          done
+
       - name: Download Chromium toolchain
-        if: matrix.cross_os == 'linux'
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
         run: |
           set -xeuo pipefail
-          cd ~/cronet-go
+          which python3
+          python3 --version
+          python3 - <<'PY_CHECK'
+          import requests
+          print('python requests:', requests.__version__)
+          PY_CHECK
+          cd "$CRONET_GO_DIR"
           go run ./cmd/build-naive --target=linux/${{ matrix.cross_arch }} download-toolchain
+
       - name: Set Chromium toolchain environment
-        if: matrix.cross_os == 'linux'
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
         run: |
           set -xeuo pipefail
-          cd ~/cronet-go
-          go run ./cmd/build-naive --target=linux/${{ matrix.cross_arch }} env >> $GITHUB_ENV
+          cd "$CRONET_GO_DIR"
+          go run ./cmd/build-naive --target=linux/${{ matrix.cross_arch }} env >> "$GITHUB_ENV"
+
       - name: Build golang parts
         if: steps.cache-common.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          set -xeuo pipefail
+          git status --short || true
           GOOS=${{ matrix.cross_os }} GOARCH=${{ matrix.cross_arch }} ./script/build_go.sh
+
       - name: Tar files
         if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
         run: tar czvf artifacts.tgz ./deployment
+
       - name: Uploading Artifact
         uses: actions/upload-artifact@v4.6.2
         with:
           name: Throne-${{ github.sha }}-Common-${{ matrix.cross_os }}-${{ matrix.cross_arch }}
           path: artifacts.tgz
+
   build-cpp:
     permissions:
       contents: read
@@ -123,271 +215,467 @@ jobs:
     strategy:
       matrix:
         include:
-          - platform: windows-latest
-            qt_version: "6.11.1"
-            target: x64
-            dest_suffix: windows-amd64
-          - platform: windows-11-arm
-            qt_version: "6.11.1"
-            target: arm64
-            dest_suffix: windows-arm64
           - platform: ubuntu-22.04
-            qt_version: "6.11.1"
+            qt_version: "6.5.3"
             target: x86_64
             dest_suffix: linux-amd64
-          - platform: ubuntu-22.04
-            qt_version: "6.2.0"
-            target: x86_64
-            dest_suffix: linux-amd64-system-qt
-          - platform: ubuntu-24.04-arm
-            qt_version: "6.11.1"
-            target: aarch64
-            dest_suffix: linux-arm64
-          - platform: ubuntu-22.04-arm
-            qt_version: "6.2.0"
-            target: aarch64
-            dest_suffix: linux-arm64-system-qt
-          - platform: macos-latest
-            qt_version: "6.11.1"
-            target: x86_64
-            dest_suffix: darwin-amd64
-          - platform: macos-latest
-            qt_version: "6.11.1"
-            target: arm64
-            dest_suffix: darwin-arm64
-          - platform: macos-latest
-            qt_version: "6.4.3"
-            target: x86_64
-            dest_suffix: darwinlegacy-amd64
-          - platform: windows-latest
-            qt_version: "6.2.13"
-            target: x64
-            dest_suffix: windowslegacy-amd64
-          - platform: windows-latest
-            qt_version: "6.2.13"
-            target: x86
-            dest_suffix: windowslegacy-386
       fail-fast: false
     runs-on: ${{ matrix.platform }}
+    container:
+      image: ubuntu:20.04
     env:
+      DEBIAN_FRONTEND: noninteractive
       INPUT_VERSION: ${{ github.event.inputs.tag }}
       DEST: ${{ github.workspace }}/deployment/${{ matrix.dest_suffix }}
       DEST_SUFFIX: ${{ matrix.dest_suffix }}
       ARCH: ${{ matrix.target }}
     steps:
+      - name: Prepare Ubuntu 20.04 build container
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash \
+            ca-certificates \
+            curl \
+            git \
+            unzip \
+            xz-utils \
+            zstd \
+            tar \
+            file \
+            build-essential \
+            gcc-10 \
+            g++-10 \
+            pkg-config \
+            python3 \
+            python3-dev \
+            python3-pip \
+            python3-setuptools \
+            python3-wheel \
+            libgl1-mesa-dev \
+            libglx-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-0 \
+            libxcb1 \
+            libxcb1-dev \
+            libxcb-cursor0 \
+            libxcb-cursor-dev \
+            libxcb-glx0 \
+            libxcb-glx0-dev \
+            libxcb-icccm4 \
+            libxcb-icccm4-dev \
+            libxcb-image0 \
+            libxcb-image0-dev \
+            libxcb-keysyms1 \
+            libxcb-keysyms1-dev \
+            libxcb-randr0 \
+            libxcb-randr0-dev \
+            libxcb-render0 \
+            libxcb-render0-dev \
+            libxcb-render-util0 \
+            libxcb-render-util0-dev \
+            libxcb-shape0 \
+            libxcb-shape0-dev \
+            libxcb-shm0 \
+            libxcb-shm0-dev \
+            libxcb-sync1 \
+            libxcb-sync-dev \
+            libxcb-util1 \
+            libxcb-util-dev \
+            libxcb-xfixes0 \
+            libxcb-xfixes0-dev \
+            libxcb-xinerama0 \
+            libxcb-xinerama0-dev \
+            libxcb-xkb1 \
+            libxcb-xkb-dev \
+            libfontconfig1 \
+            libfontconfig1-dev \
+            libfreetype6 \
+            libfreetype6-dev \
+            libdbus-1-3 \
+            libdbus-1-dev \
+            libfuse2 \
+            patchelf \
+            wget
+          rm -rf /var/lib/apt/lists/*
+
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
         with:
           submodules: "recursive"
-      - name: Install MSVC compiler
-        if: contains( matrix.platform, 'windows' )
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.target }}
-      - name: Download Artifacts
+
+      - name: Mark checkout as safe for Git inside container
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$(pwd)"
+
+      - name: Install CMake, Ninja, and aqtinstall
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          python3 --version
+          python3 - <<'PY_CHECK'
+          import sysconfig
+          from pathlib import Path
+          include_dir = Path(sysconfig.get_paths()["include"])
+          python_h = include_dir / "Python.h"
+          print("Python include:", include_dir)
+          if not python_h.exists():
+              raise SystemExit(f"Missing Python.h at {python_h}. Install python3-dev.")
+          PY_CHECK
+          python3 -m pip install --no-cache-dir --upgrade "pip<25"
+          python3 -m pip install --no-cache-dir --upgrade cmake ninja
+          python3 -m pip install --no-cache-dir --upgrade "aqtinstall<3.2"
+          cmake --version
+          ninja --version
+          aqt version
+
+      - name: Download Go Artifacts
         uses: actions/download-artifact@v4.3.0
         with:
           path: download-artifact
-      # ========================================================================================================= Qt Install
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4.3.0
-        if: (!contains(matrix.platform, 'windows')) && matrix.qt_version != '6.2.0'
-        with:
-          version: ${{ matrix.qt_version }}
-          setup-python: true
-          cache: true
-          cache-key-prefix: QtCache-${{ matrix.dest_suffix }}
-      # ========================================================================================================= Generate MakeFile and Build
-      - name: Windows - Generate MakeFile and Build
+
+      - name: Install Qt inside Ubuntu 20.04 container
         shell: bash
-        if: contains( matrix.platform, 'windows' )
         run: |
-          curl -L -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_${{ matrix.qt_version }}/Qt_${{ matrix.qt_version }}_${{ matrix.target }}.7z
-          7z x qt.7z
-          curl -L -o openssl.7z https://github.com/throneproj/env_windows_legacy/releases/download/latest/openssl_${{ matrix.target }}.7z
-          7z x openssl.7z
-          export CMAKE_PREFIX_PATH=$PWD/Qt/lib/cmake
-          export OPENSSL_ROOT_DIR=$PWD/openssl
-          mkdir build
-          cd build
-          curl -fLso srslist.h "https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h"
-          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo ..
-          ninja
-          cd ..
-          ./script/deploy_windows.sh
+          set -xeuo pipefail
+
+          echo "Available Qt architectures for ${{ matrix.qt_version }}:"
+          aqt list-qt linux desktop --arch "${{ matrix.qt_version }}" \
+            | tr ' ' '\n' \
+            | sed '/^$/d' \
+            | tee /tmp/qt-arches.txt
+
+          # aqt can print architectures in a single space-separated line.
+          # Normalize to one architecture per line before testing with grep -qx.
+          if grep -qx 'gcc_64' /tmp/qt-arches.txt; then
+            QT_AQT_ARCH='gcc_64'
+          elif grep -qx 'linux_gcc_64' /tmp/qt-arches.txt; then
+            QT_AQT_ARCH='linux_gcc_64'
+          else
+            echo 'No supported Linux x86_64 Qt architecture was found.'
+            cat /tmp/qt-arches.txt
+            exit 1
+          fi
+
+          echo "Using Qt architecture: $QT_AQT_ARCH"
+          aqt install-qt linux desktop "${{ matrix.qt_version }}" "$QT_AQT_ARCH" -O /opt/Qt
+
+          QT_QMAKE="$(find "/opt/Qt/${{ matrix.qt_version }}" -type f -path '*/bin/qmake' | head -n 1)"
+          if [ -z "$QT_QMAKE" ]; then
+            echo 'qmake was not found after Qt installation. Installed tree:'
+            find /opt/Qt -maxdepth 4 -type d -print
+            exit 1
+          fi
+
+          QT_ROOT="$(dirname "$(dirname "$QT_QMAKE")")"
+          echo "QT_ROOT=$QT_ROOT"
+          "$QT_QMAKE" --version
+
+          if [ ! -d "$QT_ROOT/lib/cmake" ]; then
+            echo "Qt CMake package directory not found at: $QT_ROOT/lib/cmake"
+            find "$QT_ROOT" -maxdepth 3 -type d -print
+            exit 1
+          fi
+
+          echo "Checking Qt shared-library dependencies:"
+          ldd "$QT_ROOT/lib/libQt6Gui.so.6" | tee /tmp/qtgui-ldd.txt
+          ldd "$QT_ROOT/lib/libQt6DBus.so.6" | tee /tmp/qtdbus-ldd.txt
+          if grep -q 'not found' /tmp/qtgui-ldd.txt /tmp/qtdbus-ldd.txt; then
+            echo "Qt has unresolved runtime dependencies inside the Ubuntu 20.04 container."
+            exit 1
+          fi
+
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$QT_ROOT/lib/cmake" >> "$GITHUB_ENV"
+          echo "QT_PLUGIN_PATH=$QT_ROOT/plugins" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$QT_ROOT/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Patch Linux deploy script for container execution
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          python3 - <<'PY_PATCH'
+          from pathlib import Path
+
+          p = Path("script/deploy_linux64.sh")
+          text = p.read_text()
+
+          # The GitHub job runs inside ubuntu:20.04 as root. There is no sudo in
+          # the minimal container, and the required packages are already installed
+          # in the container preparation step.
+          remove_lines = {
+              "sudo add-apt-repository universe",
+              "sudo apt install libfuse2",
+              "sudo apt install patchelf",
+              "sudo apt-get install libfuse2",
+              "sudo apt-get install patchelf",
+          }
+
+          lines = []
+          for line in text.splitlines():
+              if line.strip() in remove_lines:
+                  continue
+              lines.append(line)
+
+          text = "\n".join(lines) + "\n"
+
+          if "export APPIMAGE_EXTRACT_AND_RUN=1" not in text:
+              text = text.replace("set -e\n", "set -e\n\nexport APPIMAGE_EXTRACT_AND_RUN=1\n", 1)
+
+          # Do not force Wayland deployment. Qt 6.5.3 gcc_64 provides the XCB
+          # platform plugin, but libqwayland.so may not exist unless qtwayland is
+          # installed and even then the Qt 6 plugin name may differ.
+          text = text.replace(
+              'export EXTRA_QT_PLUGINS="iconengines;wayland-shell-integration;wayland-decoration-client;"',
+              'export EXTRA_QT_PLUGINS="iconengines;"'
+          )
+          text = text.replace(
+              'export EXTRA_PLATFORM_PLUGINS="libqwayland.so;"',
+              'export EXTRA_PLATFORM_PLUGINS=""'
+          )
+
+          # Make the manual plugin copy section tolerate missing optional plugins.
+          replacements = {
+              'cp $QT_PLUGIN_PATH/platforms/libqxcb.so ./usr/plugins/platforms':
+                  'if [ -f "$QT_PLUGIN_PATH/platforms/libqxcb.so" ]; then cp "$QT_PLUGIN_PATH/platforms/libqxcb.so" ./usr/plugins/platforms; fi',
+              'cp $QT_PLUGIN_PATH/platforms/libqwayland.so ./usr/plugins/platforms':
+                  'if [ -f "$QT_PLUGIN_PATH/platforms/libqwayland.so" ]; then cp "$QT_PLUGIN_PATH/platforms/libqwayland.so" ./usr/plugins/platforms; fi\nif [ -f "$QT_PLUGIN_PATH/platforms/libqwayland-generic.so" ]; then cp "$QT_PLUGIN_PATH/platforms/libqwayland-generic.so" ./usr/plugins/platforms; fi\nif [ -f "$QT_PLUGIN_PATH/platforms/libqwayland-egl.so" ]; then cp "$QT_PLUGIN_PATH/platforms/libqwayland-egl.so" ./usr/plugins/platforms; fi',
+              'cp -r $QT_PLUGIN_PATH/platformthemes ./usr/plugins':
+                  'if [ -d "$QT_PLUGIN_PATH/platformthemes" ]; then cp -r "$QT_PLUGIN_PATH/platformthemes" ./usr/plugins; fi',
+              'cp -r $QT_PLUGIN_PATH/imageformats ./usr/plugins':
+                  'if [ -d "$QT_PLUGIN_PATH/imageformats" ]; then cp -r "$QT_PLUGIN_PATH/imageformats" ./usr/plugins; fi',
+              'cp -r $QT_PLUGIN_PATH/iconengines ./usr/plugins':
+                  'if [ -d "$QT_PLUGIN_PATH/iconengines" ]; then cp -r "$QT_PLUGIN_PATH/iconengines" ./usr/plugins; fi',
+              'cp -r $QT_PLUGIN_PATH/wayland-shell-integration ./usr/plugins':
+                  'if [ -d "$QT_PLUGIN_PATH/wayland-shell-integration" ]; then cp -r "$QT_PLUGIN_PATH/wayland-shell-integration" ./usr/plugins; fi',
+              'cp -r $QT_PLUGIN_PATH/wayland-decoration-client ./usr/plugins':
+                  'if [ -d "$QT_PLUGIN_PATH/wayland-decoration-client" ]; then cp -r "$QT_PLUGIN_PATH/wayland-decoration-client" ./usr/plugins; fi',
+              'cp -r $QT_PLUGIN_PATH/tls ./usr/plugins':
+                  'if [ -d "$QT_PLUGIN_PATH/tls" ]; then cp -r "$QT_PLUGIN_PATH/tls" ./usr/plugins; fi',
+              "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqxcb.so":
+                  "if [ -f ./usr/plugins/platforms/libqxcb.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqxcb.so; fi",
+              "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland.so":
+                  "if [ -f ./usr/plugins/platforms/libqwayland.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland.so; fi\nif [ -f ./usr/plugins/platforms/libqwayland-generic.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland-generic.so; fi\nif [ -f ./usr/plugins/platforms/libqwayland-egl.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland-egl.so; fi",
+              "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqgtk3.so":
+                  "if [ -f ./usr/plugins/platformthemes/libqgtk3.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqgtk3.so; fi",
+              "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqxdgdesktopportal.so":
+                  "if [ -f ./usr/plugins/platformthemes/libqxdgdesktopportal.so ]; then patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqxdgdesktopportal.so; fi",
+          }
+          for old, new in replacements.items():
+              text = text.replace(old, new)
+
+          p.write_text(text)
+          print(p.read_text())
+          PY_PATCH
+
       - name: Linux - Generate MakeFile and Build
         shell: bash
-        if: contains( matrix.platform, 'ubuntu' ) && matrix.qt_version != '6.2.0'
         run: |
-          sudo apt update
+          set -xeuo pipefail
+
+          # Ubuntu 20.04 defaults to GCC 9.4, whose libstdc++ does not provide <span>.
+          # GCC 10 is still available in Ubuntu 20.04 and provides the C++20 header.
+          export CC=/usr/bin/gcc-10
+          export CXX=/usr/bin/g++-10
+          "$CC" --version
+          "$CXX" --version
+
           mkdir build
           cd build
           curl -fLso srslist.h "https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h"
-          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" ..
+          cmake -GNinja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=/usr/bin/gcc-10 \
+            -DCMAKE_CXX_COMPILER=/usr/bin/g++-10 \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+            ..
           ninja
           cd ..
           ./script/deploy_linux64.sh
-      - name: Linux Using System Qt - Generate MakeFile and Build
+
+      - name: Verify binary does not require newer glibc than Ubuntu 20.04
         shell: bash
-        if: contains( matrix.platform, 'ubuntu' ) && matrix.qt_version == '6.2.0'
         run: |
-          sudo apt update
-          sudo apt install -y qt6-base-dev qt6-tools-dev qt6-tools-dev-tools qt6-l10n-tools libqt6svg6-dev qt6-translations-l10n libglx-dev libgl1-mesa-dev
-          mkdir build
-          cd build
-          curl -fLso srslist.h "https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h"
-          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" ..
-          ninja
-          cd ..
-          ./script/deploy_linux64_system_qt.sh
-      - name: macOS - Generate MakeFile and Build
-        shell: bash
-        if: matrix.platform == 'macos-latest'
-        run: |
-          mkdir build
-          cd build
-          curl -fLso srslist.h "https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h"
-          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DNKR_PACKAGE_MACOS=1 -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 -DCMAKE_OSX_ARCHITECTURES=${{ matrix.target }} ..
-          ninja
-          cd ..
-          ./script/deploy_macos.sh
-      # ========================================================================================================= Deployments
+          set -xeuo pipefail
+          if [ -d "$DEST" ]; then
+            find "$DEST" -type f -print0 | while IFS= read -r -d '' file; do
+              if file "$file" | grep -q 'ELF'; then
+                readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' || true
+              fi
+            done | sort -Vu | tee glibc-required.txt
+            if grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' glibc-required.txt; then
+              echo "Found GLIBC requirement newer than Ubuntu 20.04 glibc 2.31"
+              exit 1
+            fi
+          fi
+
       - name: Tar files
         shell: bash
         run: tar czvf artifacts.tgz ./deployment
+
       - name: Uploading Artifact
         uses: actions/upload-artifact@v4.6.2
         with:
           name: Throne-${{ github.sha }}-${{ matrix.dest_suffix }}
           path: artifacts.tgz
+
   publish:
     name: Pack & Publish Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:20.04
     needs:
       - build-cpp
     permissions:
       contents: write
       actions: read
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
+      - name: Prepare Ubuntu 20.04 packaging container
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash \
+            ca-certificates \
+            curl \
+            git \
+            zip \
+            unzip \
+            xz-utils \
+            zstd \
+            tar \
+            file \
+            desktop-file-utils \
+            dpkg-dev \
+            fakeroot
+          rm -rf /var/lib/apt/lists/*
+
       - name: Checking out sources
         uses: actions/checkout@v4.2.2
+
+      - name: Mark checkout as safe for Git inside container
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$(pwd)"
+
       - name: Download Artifacts
         uses: actions/download-artifact@v4.3.0
         with:
           path: download-artifact
-      - name: Pack
+
+      - name: Pack Debian and zip packages
+        shell: bash
         run: |
+          set -xeuo pipefail
           curl -Lo - https://github.com/tcnksm/ghr/releases/download/v0.17.0/ghr_v0.17.0_linux_amd64.tar.gz | tar xzv
           mv ghr*linux_amd64/ghr .
-          find . -name artifacts.tgz | xargs -n1 tar xvzf
-          ####
-          sudo apt install nsis
-          cp ./script/windows_installer.nsi .
-          makensis windows_installer.nsi
-          cp ThroneSetup.exe deployment/Throne-${{ github.event.inputs.tag }}-windows-universal-installer.exe
-          ####
+
+          find . -name artifacts.tgz -print0 | xargs -0 -n1 tar xvzf
+
           cd deployment
-          mkdir debug
-          ####
-          bash ../script/pack_debian.sh ${{ github.event.inputs.tag }} amd64
-          mv Throne.deb Throne-${{ github.event.inputs.tag }}-debian-amd64.deb
+          mkdir -p debug
+
+          bash ../script/pack_debian.sh "${{ github.event.inputs.tag }}" amd64
+          mv Throne.deb "Throne-${{ github.event.inputs.tag }}-debian-amd64.deb"
           rm -rf Throne
-          ####
-          bash ../script/pack_debian.sh ${{ github.event.inputs.tag }} amd64 systemqt
-          mv Throne.deb Throne-${{ github.event.inputs.tag }}-debian-amd64-system-qt.deb
+
+          cp -a linux-amd64 Throne
+          if [ -f Throne/Throne.debug ]; then
+            mv Throne/Throne.debug "debug/Throne-${{ github.event.inputs.tag }}-linux-amd64.debug"
+          fi
+          zip -9 -r "Throne-${{ github.event.inputs.tag }}-linux-amd64.zip" Throne
           rm -rf Throne
-          ####
-          bash ../script/pack_debian.sh ${{ github.event.inputs.tag }} arm64
-          mv Throne.deb Throne-${{ github.event.inputs.tag }}-debian-arm64.deb
-          rm -rf Throne
-          ####
-          bash ../script/pack_debian.sh ${{ github.event.inputs.tag }} arm64 systemqt
-          mv Throne.deb Throne-${{ github.event.inputs.tag }}-debian-arm64-system-qt.deb
-          rm -rf Throne
-          ####
-          mv linux-amd64 Throne
-          mv Throne/Throne.debug debug/Throne-${{ github.event.inputs.tag }}-linux-amd64.debug
-          zip -9 -r Throne-${{ github.event.inputs.tag }}-linux-amd64.zip Throne
-          rm -rf Throne
-          ####
-          mv linux-arm64 Throne
-          mv Throne/Throne.debug debug/Throne-${{ github.event.inputs.tag }}-linux-arm64.debug
-          zip -9 -r Throne-${{ github.event.inputs.tag }}-linux-arm64.zip Throne
-          rm -rf Throne
-          ####
-          mv windows-amd64 Throne
-          mv Throne/Throne.pdb debug/Throne-${{ github.event.inputs.tag }}-windows-amd64.pdb
-          zip -9 -r Throne-${{ github.event.inputs.tag }}-windows64.zip Throne
-          rm -rf Throne
-          ####
-          mv windows-arm64 Throne
-          mv Throne/Throne.pdb debug/Throne-${{ github.event.inputs.tag }}-windows-arm64.pdb
-          zip -9 -r Throne-${{ github.event.inputs.tag }}-windows-arm64.zip Throne
-          rm -rf Throne
-          ####
-          mv windowslegacy-386 Throne
-          mv Throne/Throne.pdb debug/Throne-${{ github.event.inputs.tag }}-windowslegacy-386.pdb
-          zip -9 -r Throne-${{ github.event.inputs.tag }}-windows32.zip Throne
-          rm -rf Throne
-          ####
-          mv windowslegacy-amd64 Throne
-          mv Throne/Throne.pdb debug/Throne-${{ github.event.inputs.tag }}-windowslegacy-amd64.pdb
-          zip -9 -r Throne-${{ github.event.inputs.tag }}-windowslegacy64.zip Throne
-          rm -rf Throne
-          ####
-          mkdir Throne
-          mv darwin-arm64/Throne.app Throne/Throne.app
-          mv Throne/Throne.app/Contents/MacOS/Throne.dSYM debug/Throne-${{ github.event.inputs.tag }}-macos-arm64.dSYM
-          zip -9 --symlinks -r Throne-${{ github.event.inputs.tag }}-macos-arm64.zip Throne
-          rm -rf darwin-arm64
-          rm -rf Throne
-          ####
-          mkdir Throne
-          mv darwin-amd64/Throne.app Throne/Throne.app
-          mv Throne/Throne.app/Contents/MacOS/Throne.dSYM debug/Throne-${{ github.event.inputs.tag }}-macos-amd64.dSYM
-          zip -9 --symlinks -r Throne-${{ github.event.inputs.tag }}-macos-amd64.zip Throne
-          rm -rf darwin-amd64
-          rm -rf Throne
-          ####
-          mkdir Throne
-          mv darwinlegacy-amd64/Throne.app Throne/Throne.app
-          mv Throne/Throne.app/Contents/MacOS/Throne.dSYM debug/Throne-${{ github.event.inputs.tag }}-macoslegacy-amd64.dSYM
-          zip -9 --symlinks -r Throne-${{ github.event.inputs.tag }}-macoslegacy-amd64.zip Throne
-          rm -rf darwinlegacy-amd64
-          rm -rf Throne
-          ####
+
           zip -9 -r debug-symbols.zip debug
+
+      - name: Build optional AppImage
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          cd deployment
+
+          APPDIR="$PWD/AppDir"
+          rm -rf "$APPDIR"
+          mkdir -p "$APPDIR/usr"
+          cp -a linux-amd64/. "$APPDIR/usr/"
+          rm -f "$APPDIR/usr/Throne.debug"
+
+          if [ ! -x "$APPDIR/usr/Throne" ]; then
+            echo "Cannot find executable at $APPDIR/usr/Throne. Adjust this path if your deploy script uses a different layout."
+            exit 1
+          fi
+
+          cat > "$APPDIR/Throne.desktop" <<'DESKTOP_EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Throne
+          Exec=Throne
+          Icon=Throne
+          Categories=Network;
+          Terminal=false
+          DESKTOP_EOF
+
+          cat > "$APPDIR/Throne.svg" <<'SVG_EOF'
+          <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+            <rect width="256" height="256" rx="48" fill="#202020"/>
+            <text x="128" y="154" text-anchor="middle" font-family="Arial, sans-serif" font-size="86" font-weight="700" fill="#ffffff">T</text>
+          </svg>
+          SVG_EOF
+
+          curl -fL -o linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir "$APPDIR" \
+            --executable "$APPDIR/usr/Throne" \
+            --desktop-file "$APPDIR/Throne.desktop" \
+            --icon-file "$APPDIR/Throne.svg" \
+            --output appimage
+
+          mv ./*.AppImage "Throne-${{ github.event.inputs.tag }}-linux-amd64.AppImage"
+          rm -rf "$APPDIR" linuxdeploy-x86_64.AppImage
+
       - name: Uploading Debug Artifact
         uses: actions/upload-artifact@v4.6.2
         with:
           name: Debug-${{ github.sha }}
           path: deployment/debug-symbols.zip
+
       - name: Clean Up
+        shell: bash
         run: |
+          set -xeuo pipefail
           cd deployment
-          rm -rf windows-amd64
-          rm -rf windows-arm64
           rm -rf linux-amd64
-          rm -rf linux-amd64-system-qt
-          rm -rf linux-arm64
-          rm -rf linux-arm64-system-qt
-          rm -rf darwin-amd64
-          rm -rf darwin-arm64
-          rm -rf darwinlegacy-amd64
-          rm -rf windowslegacy-amd64
-          rm -rf windowslegacy-386
-          rm -rf *.pdb
           rm -rf debug*
+
       - name: Uploading Artifact
         uses: actions/upload-artifact@v4.6.2
         with:
           name: Deployment-${{ github.sha }}
           path: deployment
+
       - name: PreRelease
         if: github.event.inputs.publish == 'p'
+        shell: bash
         run: |
           ./ghr -prerelease -delete -c ${{ github.sha }} -t "${{ github.token }}" -n "${{ github.event.inputs.tag }}" "${{ github.event.inputs.tag }}" deployment
+
       - name: Release
         if: github.event.inputs.publish == 'r'
+        shell: bash
         run: |
           ./ghr -delete -c ${{ github.sha }} -t "${{ github.token }}" -n "${{ github.event.inputs.tag }}" "${{ github.event.inputs.tag }}" deployment
