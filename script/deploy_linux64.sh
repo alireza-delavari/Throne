@@ -1,4 +1,5 @@
 #!/bin/bash
+# FINAL_UBUNTU20_COMPAT_CONTAINER_SAFE_NO_WAYLAND_FORCE_V2
 set -euo pipefail
 
 rm -rf "$DEST"
