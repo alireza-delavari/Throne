@@ -1,4 +1,4 @@
-# Linux amd64 only. Runs on ubuntu-22.04 GitHub runner, builds inside ubuntu:20.04 container; uses Qt 6.5.3 and GCC 10 for Ubuntu 20.04-compatible glibc baseline; deploy script is patched for root/container execution and optional Wayland plugins.
+# Linux amd64 only. Runs on ubuntu-22.04 GitHub runner, builds inside ubuntu:20.04 container; uses Qt 6.5.3 and GCC 10 for Ubuntu 20.04-compatible glibc baseline; deploy script is patched for root/container execution and Wayland plugins disabled and per-file glibc diagnostics.
 # Builds inside ubuntu:20.04 and patches Chromium sysroot scripts discovered under naiveproxy/src for Ubuntu 20.04 Python 3.8.
 name: Throne Linux amd64 build
 
@@ -71,7 +71,7 @@ jobs:
         uses: actions/cache@v4.2.3
         with:
           path: artifacts.tgz
-          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/*') }}-${{ matrix.go_version }}-ubuntu2004-py38-cronet-find-sysroot-safe-git-v4
+          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/*') }}-${{ matrix.go_version }}-ubuntu2004-py38-cronet-find-sysroot-safe-git-glibc-v6
 
 
       - name: Install Go and Protoc in Ubuntu 20.04 container
@@ -195,6 +195,41 @@ jobs:
           set -xeuo pipefail
           git status --short || true
           GOOS=${{ matrix.cross_os }} GOARCH=${{ matrix.cross_arch }} ./script/build_go.sh
+
+      - name: Verify Go artifacts do not require newer glibc than Ubuntu 20.04
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          bad=0
+          : > glibc-required-go.txt
+          : > glibc-offenders-go.txt
+
+          if [ -d "$DEST" ]; then
+            while IFS= read -r -d '' file; do
+              if file "$file" | grep -q 'ELF'; then
+                versions="$(readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true)"
+                if [ -n "$versions" ]; then
+                  printf '%s\n' "$versions" >> glibc-required-go.txt
+                fi
+                if printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' >/dev/null; then
+                  {
+                    echo "OFFENDER: $file"
+                    printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)'
+                    echo
+                  } | tee -a glibc-offenders-go.txt
+                  bad=1
+                fi
+              fi
+            done < <(find "$DEST" -type f -print0)
+          fi
+
+          sort -Vu glibc-required-go.txt | tee glibc-required-go.sorted.txt
+          if [ "$bad" -ne 0 ]; then
+            echo "Go artifact contains GLIBC requirements newer than Ubuntu 20.04 glibc 2.31."
+            cat glibc-offenders-go.txt
+            exit 1
+          fi
 
       - name: Tar files
         if: steps.cache-common.outputs.cache-hit != 'true'
@@ -452,9 +487,9 @@ jobs:
               'cp -r $QT_PLUGIN_PATH/iconengines ./usr/plugins':
                   'if [ -d "$QT_PLUGIN_PATH/iconengines" ]; then cp -r "$QT_PLUGIN_PATH/iconengines" ./usr/plugins; fi',
               'cp -r $QT_PLUGIN_PATH/wayland-shell-integration ./usr/plugins':
-                  'if [ -d "$QT_PLUGIN_PATH/wayland-shell-integration" ]; then cp -r "$QT_PLUGIN_PATH/wayland-shell-integration" ./usr/plugins; fi',
+                  ': # Wayland shell integration intentionally not deployed for Ubuntu 20.04 XCB package',
               'cp -r $QT_PLUGIN_PATH/wayland-decoration-client ./usr/plugins':
-                  'if [ -d "$QT_PLUGIN_PATH/wayland-decoration-client" ]; then cp -r "$QT_PLUGIN_PATH/wayland-decoration-client" ./usr/plugins; fi',
+                  ': # Wayland decoration client intentionally not deployed for Ubuntu 20.04 XCB package',
               'cp -r $QT_PLUGIN_PATH/tls ./usr/plugins':
                   'if [ -d "$QT_PLUGIN_PATH/tls" ]; then cp -r "$QT_PLUGIN_PATH/tls" ./usr/plugins; fi',
               "patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqxcb.so":
@@ -498,18 +533,48 @@ jobs:
           cd ..
           ./script/deploy_linux64.sh
 
+      - name: Remove optional Wayland plugins from Linux package
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          # This package targets Ubuntu 20.04 X11/XCB compatibility. Do not ship
+          # optional Wayland plugins from the prebuilt Qt archive unless they pass
+          # the same glibc baseline check.
+          rm -f "$DEST/usr/plugins/platforms"/libqwayland*.so || true
+          rm -rf "$DEST/usr/plugins/wayland-shell-integration" || true
+          rm -rf "$DEST/usr/plugins/wayland-decoration-client" || true
+
       - name: Verify binary does not require newer glibc than Ubuntu 20.04
         shell: bash
         run: |
           set -xeuo pipefail
+          bad=0
+          : > glibc-required.txt
+          : > glibc-offenders.txt
+
           if [ -d "$DEST" ]; then
-            find "$DEST" -type f -print0 | while IFS= read -r -d '' file; do
+            while IFS= read -r -d '' file; do
               if file "$file" | grep -q 'ELF'; then
-                readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' || true
+                versions="$(readelf -W --version-info "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true)"
+                if [ -n "$versions" ]; then
+                  printf '%s\n' "$versions" >> glibc-required.txt
+                fi
+                if printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' >/dev/null; then
+                  {
+                    echo "OFFENDER: $file"
+                    printf '%s\n' "$versions" | grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)'
+                    echo
+                  } | tee -a glibc-offenders.txt
+                  bad=1
+                fi
               fi
-            done | sort -Vu | tee glibc-required.txt
-            if grep -E 'GLIBC_(2\.3[2-9]|2\.[4-9][0-9]|[3-9]\.)' glibc-required.txt; then
+            done < <(find "$DEST" -type f -print0)
+
+            sort -Vu glibc-required.txt | tee glibc-required.sorted.txt
+            if [ "$bad" -ne 0 ]; then
               echo "Found GLIBC requirement newer than Ubuntu 20.04 glibc 2.31"
+              echo "Offending files:"
+              cat glibc-offenders.txt
               exit 1
             fi
           fi
