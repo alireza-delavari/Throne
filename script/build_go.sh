@@ -1,4 +1,5 @@
 #!/bin/bash
+# FINAL_UBUNTU20_COMPAT_NO_LINUX_UPDATER_V2
 set -euo pipefail
 
 TAGS="with_clash_api,with_gvisor,with_quic,with_wireguard,with_utls,with_dhcp,with_tailscale,badlinkname,tfogo_checklinkname0"
