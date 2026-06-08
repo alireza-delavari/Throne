@@ -8,11 +8,20 @@ mkdir -p $DEST
 
 [[ "$GOOS" =~ legacy$ ]] && IS_LEGACY=true && GOCMD="$PWD/golang.org/go/bin/go" && GOOS="${GOOS%legacy}" || { IS_LEGACY=false; GOCMD="go"; }
 
-if [[ "$GOOS" == "windows" || "$GOOS" == "linux" ]]; then
-    FILE=$([[ "$GOOS" == "windows" ]] && echo "updater-windows-x${GOARCH: -2}.exe" || echo "updater-linux-$GOARCH")
-    curl -fLso "$DEST/updater$([[ "$GOOS" == "windows" ]] && echo ".exe")" "https://github.com/throneproj/updater/releases/latest/download/$FILE"
-    [[ "$GOOS" == "linux" ]] && chmod +x "$DEST/updater"
+#if [[ "$GOOS" == "windows" || "$GOOS" == "linux" ]]; then
+#    FILE=$([[ "$GOOS" == "windows" ]] && echo "updater-windows-x${GOARCH: -2}.exe" || echo "updater-linux-$GOARCH")
+#    curl -fLso "$DEST/updater$([[ "$GOOS" == "windows" ]] && echo ".exe")" "https://github.com/throneproj/updater/releases/latest/download/$FILE"
+#    [[ "$GOOS" == "linux" ]] && chmod +x "$DEST/updater"
+#fi
+if [[ "$GOOS" == "windows" ]]; then
+    FILE="updater-windows-x${GOARCH: -2}.exe"
+    curl -fLso "$DEST/updater.exe" \
+      "https://github.com/throneproj/updater/releases/latest/download/$FILE"
 fi
+
+# Do not download the official Linux updater here.
+# It is currently built on ubuntu-22.04 and requires GLIBC_2.34,
+# so it breaks Ubuntu 20.04 compatibility.
 
 case "$GOOS" in
   windows)
