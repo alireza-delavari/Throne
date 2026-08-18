@@ -14,10 +14,14 @@ cp "$GITHUB_WORKSPACE/res/public/Throne.png" "$DEST"
 #### copy Go artifacts ####
 source "$(dirname "$0")/extract_core_artifact.sh"
 
-cd download-artifact
-cd *"$DEST_SUFFIX"
-tar xvzf artifacts.tgz -C ../../
-cd ../..
+echo "download-artifact:"
+ls download-artifact || true
+echo "download-artifact/linux-amd64 $DEST_SUFFIX:"
+ls download-artifact/linux-amd64 || true
+#cd download-artifact
+#cd *"$DEST_SUFFIX"
+#tar xvzf artifacts.tgz -C ../../
+#cd ../..
 
 
 if [ -f "$DEST/updater" ]; then
