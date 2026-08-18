@@ -17,6 +17,28 @@ class ProfilesTableModel : public QAbstractTableModel {
 public:
     enum { ProfileIdRole = Qt::UserRole };
 
+    // Column order of the proxy table. Everything that indexes the table by
+    // column (sorting, header menus, saved widths, the filter header) refers to
+    // these instead of raw numbers.
+    enum Column {
+        ColType = 0,
+        ColAddress,
+        ColName,
+        ColTestResult,
+        ColTraffic,
+        ColumnCount,
+    };
+
+    // Filterable fields, held in memory so filtering never pages profiles in one
+    // at a time through the LRU cache below.
+    struct FilterKey {
+        QString type;
+        QString address;
+        QString name;
+        QString country;
+        int port = 0;
+    };
+
     explicit ProfilesTableModel(QObject *parent = nullptr);
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
@@ -28,12 +50,8 @@ public:
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
     QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
 
-    // Set the list of profile IDs (filtered, display order). Emits layoutChanged.
+    // Set the list of profile IDs, in the group's own order.
     void refreshTable(const QList<int> &ids = {}, bool mayNeedReset = false);
-    QList<int> profileIds() const { return m_profileIds; }
-
-    // Profile ID for a given row (for selection / double-click).
-    int profileIdAt(int row) const;
 
     // Invalidate one row so the view repaints (e.g. after latency/traffic update).
     void refreshProfileId(int profileId);
@@ -42,17 +60,25 @@ public:
 
     int indexOfProfile(int id);
 
-    // Row label for vertical header: "✓" for running row, else "row+1  ".
-    QString rowLabel(int row) const;
+    // Vertical header label: "✓" for the running profile, else displayRow + 1.
+    // A filter makes the two rows disagree, hence both arguments.
+    QString rowLabel(int sourceRow, int displayRow) const;
+
+    // Null if the profile could not be loaded; valid until the next model change.
+    const FilterKey *filterKeyAt(int row) const;
 
 private:
     void ensureCached(int profileId) const;
     void evictOne() const;
     void setProfileIds(const QList<int> &ids);
+    void ensureFilterIndex() const;
 
     QList<int> m_profileIds;
     mutable QHash<int, int> id2row;
     mutable QHash<int, std::shared_ptr<Configs::Profile>> m_cache;
     mutable QList<int> m_lruOrder;
     int m_cacheSize = 100;
+
+    mutable QHash<int, FilterKey> m_filterKeys;
+    mutable bool m_filterIndexBuilt = false;
 };

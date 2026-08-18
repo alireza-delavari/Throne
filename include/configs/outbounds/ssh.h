@@ -24,5 +24,6 @@ namespace Configs
         BuildResult Build() override;
 
         QString DisplayType() override;
+        SecurityInfo GetSecurity() override;
     };
 }

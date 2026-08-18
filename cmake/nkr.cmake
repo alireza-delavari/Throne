@@ -1,6 +1,6 @@
 # Release
 set(NKR_VERSION "$ENV{INPUT_VERSION}")
-add_compile_definitions(NKR_VERSION=\"${NKR_VERSION}\")
+configure_file("${CMAKE_SOURCE_DIR}/cmake/NkrVersion.h.in" "${CMAKE_BINARY_DIR}/NkrVersion.h" @ONLY)
 
 # Debug
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DNKR_CPP_DEBUG")

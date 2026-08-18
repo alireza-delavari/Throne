@@ -28,6 +28,11 @@ namespace Stats {
         long long last_update = 0;
         double uplink_rate = 0;
         double downlink_rate = 0;
+        // Set when the group credited a non-zero delta since the last persist.
+        // Auto-selector pools contribute one idle group per unselected member,
+        // so persisting only dirty groups keeps that cost proportional to
+        // traffic rather than to pool size.
+        bool dirty = false;
     };
 
     class TrafficLooper {
@@ -42,6 +47,11 @@ namespace Stats {
         void UpdateAll();
 
         void Loop();
+
+        // Persist every active profile's legacy traffic total to disk in one
+        // batched transaction. Called on a slow cadence from the loop and once on
+        // stop/exit; runs synchronously on the caller's thread (no thread spawn).
+        void PersistTraffic();
 
         void SetChainGroups(const QList<Configs::TrafficChainGroup>& configGroups);
 

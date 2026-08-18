@@ -12,10 +12,13 @@ cp "$GITHUB_WORKSPACE/build/Throne" "$DEST"
 cp "$GITHUB_WORKSPACE/res/public/Throne.png" "$DEST"
 
 #### copy Go artifacts ####
+source "$(dirname "$0")/extract_core_artifact.sh"
+
 cd download-artifact
 cd *"$DEST_SUFFIX"
 tar xvzf artifacts.tgz -C ../../
 cd ../..
+
 
 if [ -f "$DEST/updater" ]; then
   chmod +x "$DEST/updater"

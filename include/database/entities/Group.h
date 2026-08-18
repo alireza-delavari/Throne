@@ -27,6 +27,11 @@ namespace Configs
         ul
     };
 
+    enum class typeBy : int {
+        byType = 0,
+        bySecurity
+    };
+
     class Group {
     public:
         QMutex mutex;
@@ -48,8 +53,10 @@ namespace Configs
         int scroll_last_profile = -1;
         testBy test_sort_by = testBy::latency;
         trafficBy traffic_sort_by = trafficBy::total;
+        typeBy type_sort_by = typeBy::byType;
         testShowItems test_items_to_show = testShowItems::all;
-        QList<std::pair<int, int>> selectedProfilesIdIdxPairs; // memory only, no need to save to db, pairs of (profileID, index)
+        // Memory only, not persisted. Pairs of (profileID, row as displayed).
+        QList<std::pair<int, int>> selectedProfilesIdIdxPairs;
 
         Group() = default;
 

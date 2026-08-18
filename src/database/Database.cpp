@@ -1,5 +1,6 @@
 #include "include/database/Database.h"
 #include <3rdparty/SQLiteCpp/include/Backup.h>
+#include <algorithm>
 #include <set>
 
 namespace Configs {
@@ -15,6 +16,35 @@ namespace Configs {
             db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
         } catch (std::exception& e) {
             std::cerr << "DB WAL checkpoint error: " << e.what() << std::endl;
+        }
+    }
+
+    void Database::RunMaintenance() {
+        checkpointWal();
+        maybeVacuum();
+    }
+
+    void Database::maybeVacuum() {
+        try {
+            const long long freePages = db.execAndGet("PRAGMA freelist_count").getInt64();
+            const long long pageCount = db.execAndGet("PRAGMA page_count").getInt64();
+            const long long pageSize  = db.execAndGet("PRAGMA page_size").getInt64();
+            if (pageCount <= 0 || pageSize <= 0 || freePages <= 0) return;
+
+            const long long freeBytes = freePages * pageSize;
+            const double freeRatio = static_cast<double>(freePages) / static_cast<double>(pageCount);
+            if (freeBytes < VACUUM_MIN_FREE_BYTES || freeRatio < VACUUM_MIN_FREE_RATIO) return;
+
+            if (db.execAndGet("PRAGMA auto_vacuum").getInt64() == 2) {
+                db.exec("PRAGMA incremental_vacuum(" + std::to_string(INCREMENTAL_VACUUM_PAGES) + ")");
+            } else {
+                db.exec("VACUUM");
+            }
+            // In WAL mode the on-disk shrink only lands once the WAL is checkpointed.
+            checkpointWal();
+        } catch (std::exception& e) {
+            // A concurrent transaction on this connection fails VACUUM; next launch retries.
+            std::cerr << "DB VACUUM check error: " << e.what() << std::endl;
         }
     }
 
@@ -78,10 +108,10 @@ namespace Configs {
     void Database::execBatchInsertProfilesChunk(const std::vector<ProfileInsertRow>& rows) {
         if (rows.empty()) return;
         const size_t n = rows.size();
-        std::string sql = "INSERT INTO profiles (id, type, name, gid, latency, dl_speed, ul_speed, test_country, ip_out, outbound_json, traffic_dl, traffic_up) VALUES ";
+        std::string sql = "INSERT INTO profiles (id, type, name, gid, latency, latency_at, dl_speed, ul_speed, test_country, ip_out, outbound_json, traffic_dl, traffic_up) VALUES ";
         for (size_t i = 0; i < n; ++i) {
             if (i > 0) sql += ",";
-            sql += "(?,?,?,?,?,?,?,?,?,?,?,?)";
+            sql += "(?,?,?,?,?,?,?,?,?,?,?,?,?)";
         }
         try {
             SQLite::Statement stmt(db, sql);
@@ -92,6 +122,7 @@ namespace Configs {
                 stmt.bind(idx++, r.name);
                 stmt.bind(idx++, r.gid);
                 stmt.bind(idx++, r.latency);
+                stmt.bind(idx++, static_cast<int64_t>(r.latency_at));
                 stmt.bind(idx++, r.dl_speed);
                 stmt.bind(idx++, r.ul_speed);
                 stmt.bind(idx++, r.test_country);
@@ -110,10 +141,10 @@ namespace Configs {
     void Database::execBatchReplaceProfilesChunk(const std::vector<ProfileInsertRow>& rows) {
         if (rows.empty()) return;
         const size_t n = rows.size();
-        std::string sql = "INSERT OR REPLACE INTO profiles (id, type, name, gid, latency, dl_speed, ul_speed, test_country, ip_out, outbound_json, traffic_dl, traffic_up) VALUES ";
+        std::string sql = "INSERT OR REPLACE INTO profiles (id, type, name, gid, latency, latency_at, dl_speed, ul_speed, test_country, ip_out, outbound_json, traffic_dl, traffic_up) VALUES ";
         for (size_t i = 0; i < n; ++i) {
             if (i > 0) sql += ",";
-            sql += "(?,?,?,?,?,?,?,?,?,?,?,?)";
+            sql += "(?,?,?,?,?,?,?,?,?,?,?,?,?)";
         }
         try {
             SQLite::Statement stmt(db, sql);
@@ -124,6 +155,7 @@ namespace Configs {
                 stmt.bind(idx++, r.name);
                 stmt.bind(idx++, r.gid);
                 stmt.bind(idx++, r.latency);
+                stmt.bind(idx++, static_cast<int64_t>(r.latency_at));
                 stmt.bind(idx++, r.dl_speed);
                 stmt.bind(idx++, r.ul_speed);
                 stmt.bind(idx++, r.test_country);
@@ -158,6 +190,7 @@ namespace Configs {
         const std::vector<std::string> kProfileTables = {"profiles", "groups_order", "groups"};
         const std::vector<std::string> kRouteTables = {"route_rules", "route_profiles"};
         const std::vector<std::string> kSettingsTables = {"settings"};
+        const std::vector<std::string> kOtpTables = {"otp_profiles"};
 
         std::vector<std::string> tableColumns(SQLite::Database& d, const std::string& schema, const std::string& table) {
             std::vector<std::string> cols;
@@ -171,6 +204,13 @@ namespace Configs {
             SQLite::Statement q(d, "SELECT 1 FROM " + schema + ".sqlite_master WHERE type='table' AND name=?");
             q.bind(1, table);
             return q.executeStep();
+        }
+
+        bool columnExists(SQLite::Database& d, const std::string& schema, const std::string& table,
+                          const std::string& column) {
+            if (!tableExists(d, schema, table)) return false;
+            const auto cols = tableColumns(d, schema, table);
+            return std::find(cols.begin(), cols.end(), column) != cols.end();
         }
 
         // Replace every row of main.<table> with the rows from bak.<table>,
@@ -216,6 +256,7 @@ namespace Configs {
         if (!parts.profiles) wipe(kProfileTables);
         if (!parts.routes) wipe(kRouteTables);
         if (!parts.settings) wipe(kSettingsTables);
+        if (!parts.otp) wipe(kOtpTables);
         try { dest.exec("VACUUM"); } catch (...) {}
     }
 
@@ -236,6 +277,7 @@ namespace Configs {
             if (parts.profiles) for (const auto& t : kProfileTables) copyTable(db, t);
             if (parts.routes) for (const auto& t : kRouteTables) copyTable(db, t);
             if (parts.settings) for (const auto& t : kSettingsTables) copyTable(db, t);
+            if (parts.otp) for (const auto& t : kOtpTables) copyTable(db, t);
 
             // Keep the ID counters ahead of any restored data so freshly created
             // profiles/groups/routes never collide with restored ones.
@@ -252,6 +294,14 @@ namespace Configs {
                     "route_profile_last_id = MAX(route_profile_last_id,"
                     "(SELECT COALESCE(MAX(id),0) FROM route_profiles)" +
                     std::string(bakIds ? ",(SELECT COALESCE(MAX(route_profile_last_id),0) FROM bak.entity_ids)" : "") + ")");
+            }
+
+            if (parts.otp) {
+                const bool bakOtpIds = columnExists(db, "bak", "entity_ids", "otp_profile_last_id");
+                db.exec(
+                    "UPDATE entity_ids SET otp_profile_last_id = MAX(otp_profile_last_id,"
+                    "(SELECT COALESCE(MAX(id),0) FROM otp_profiles)" +
+                    std::string(bakOtpIds ? ",(SELECT COALESCE(MAX(otp_profile_last_id),0) FROM bak.entity_ids)" : "") + ")");
             }
 
             db.exec("COMMIT");

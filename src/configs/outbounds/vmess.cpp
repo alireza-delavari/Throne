@@ -164,4 +164,15 @@ namespace Configs {
     {
         return "VMess";
     }
+
+    SecurityInfo vmess::GetSecurity()
+    {
+        auto info = outbound::GetSecurity();
+        // VMess still encrypts its payload without TLS, unless a no-op cipher.
+        if (info.level == SecurityLevel::None && security != "none" && security != "zero") {
+            info.label = QObject::tr("Encrypted");
+            info.level = SecurityLevel::Weak;
+        }
+        return info;
+    }
 }

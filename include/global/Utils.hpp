@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <QObject>
+#include <QDir>
 #include <QString>
 #include <QStringList>
 #include <QDebug>
@@ -57,6 +58,10 @@ inline QString getOSString() {
 inline QString software_name;
 inline QString software_core_name;
 
+// Epoch-seconds when the app started; set once in main(). Read by the Runtime
+// Stats panel to display Throne's uptime.
+inline qint64 appStartEpoch = 0;
+
 // MainWindow functions
 class QWidget;
 inline QWidget *mainwindow;
@@ -74,6 +79,10 @@ enum class MwMessage {
     GroupsChanged,        // groups were added/removed/edited; refresh the group tabs
     SubscriptionFinished, // a subscription import finished; arg MwArg::Quiet to skip the count line
     SubscriptionNewGroup, // the updater created a new group
+    // A subscription refresh changed a group's servers. Args: { group id, then
+    // the id of every profile it deleted or replaced in place }. Auto selectors
+    // resolve their members from the group, so this is the only notice they get.
+    SubscriptionGroupChanged,
     CoreCrashed,          // the external core process died
     CoreStarted,          // the core came up; args: { startedProfileId }
 };
@@ -91,6 +100,9 @@ namespace MwArg {
     inline const QString TrayIcon     = QStringLiteral("trayIcon");
     inline const QString MaxLogLines  = QStringLiteral("maxLogLines");
     inline const QString DisableAdmin = QStringLiteral("disableAdmin");
+    // A proxy-table display option changed (e.g. show-config-security), so the
+    // list must be re-rendered and its auto-sized columns recomputed.
+    inline const QString ProfileListDisplay = QStringLiteral("profileListDisplay");
     // ProfileChanged: the saved profile is the running one, so offer a proxy restart.
     inline const QString RestartProxy = QStringLiteral("restartProxy");
     // SubscriptionFinished: a detailed diff was already logged, so skip the import-count line.
@@ -101,23 +113,28 @@ inline std::function<void(MwMessage, QStringList)> MW_dialog_message;
 // Handles a "throne://" deeplink. Set by MainWindow; marshals to the UI thread.
 inline std::function<void(QString)> MW_handle_deeplink;
 
+// Imports config files the OS handed us ("Open with Throne"). Set by MainWindow;
+// marshals to the UI thread.
+inline std::function<void(QStringList)> MW_import_files;
+
 // Deeplink plumbing (see Utils.cpp). Delivery channels feed URLs in here; the
 // pending buffer covers URLs that arrive before the main window exists.
 QString Deeplink_ExtractFromArgs(const QStringList &args);
 void Deeplink_Submit(const QString &url);
 void Deeplink_FlushPending();
 
+// Same plumbing for files opened with the app. Paths arrive as launch arguments,
+// as a second instance's hand-off, or (macOS) as a file-open event, and may be
+// given either as a path or as a file:// URL.
+QStringList LaunchFiles_ExtractFromArgs(const QStringList &args, const QDir &launchDir);
+void LaunchFiles_Submit(const QStringList &paths);
+void LaunchFiles_FlushPending();
+
 // Dispatchers
 
 class QThread;
 inline QThread *DS_cores;
 inline QThread *LogThread;
-
-// Timers
-
-class QTimer;
-inline QTimer *TM_auto_update_subsctiption;
-inline std::function<void(int)> TM_auto_update_subsctiption_Reset_Minute;
 
 // String
 
@@ -159,13 +176,6 @@ QString GetRandomString(int randomStringLength);
 
 quint64 GetRandomUint64();
 
-// Random 127.x.y.z address from the loopback /8. Used to give each internal
-// sing-box <-> xray socks bridge a unique destination so concurrent
-// connections don't share one ephemeral-port pool. On macOS only 127.0.0.1
-// is bound to lo0 by default (other /8 addresses need an `ifconfig alias`),
-// so this falls back to 127.0.0.1 there.
-QString GenRandomLoopback();
-
 // JSON
 
 class QJsonObject;
@@ -184,6 +194,8 @@ QList<int> QJsonArray2QListInt(const QJsonArray &arr);
 QJsonObject QMapString2QJsonObject(const QMap<QString,QString> &mp);
 
 QList<QString> QListInt2QListString(const QList<int> &list);
+
+QList<int> QStringList2QListInt(const QList<QString> &list);
 
 #define QJSONARRAY_ADD(arr, add) \
     for (const auto &a: (add)) { \
@@ -236,9 +248,17 @@ inline QString DisplayDest(const QString& dest, QString domain)
 
 // Format & Misc
 
-int MkPort();
+// Reserve free TCP ports by binding and releasing them. `address` must be the
+// interface the caller is going to bind, because "is this port free" is a different
+// question per interface — and because listen()'s own default is the dual-stack
+// any-address, which Windows refuses outright on a host with IPv6 disabled. An empty
+// address means any interface. Both return 0 / a 0 entry when no port could be
+// reserved; callers must treat that as an error rather than emit it into a config.
+int MkPort(const QString &address = {});
 
-QList<int> MkManyPorts(int num);
+// Defaults to loopback: every caller reserves ports for the sing-box <-> Xray socks
+// bridges, which listen on 127.0.0.1.
+QList<int> MkManyPorts(int num, const QString &address = "127.0.0.1");
 
 QString DisplayTime(long long time, int formatType = 0);
 
@@ -259,6 +279,10 @@ QWidget *GetMessageBoxParent();
 int MessageBoxWarning(const QString &title, const QString &text);
 
 int MessageBoxInfo(const QString &title, const QString &text);
+
+void MessageBoxScrollable(const QString &title, const QString &text);
+
+int MessageBoxCheck(const QString &title, const QString &text, const QString &checkBoxText, bool &isChecked);
 
 void ActivateWindow(QWidget *w);
 

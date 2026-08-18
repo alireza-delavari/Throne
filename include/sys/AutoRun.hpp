@@ -6,6 +6,6 @@ void AutoRun_SetEnabled(bool enable);
 
 bool AutoRun_IsEnabled();
 
-void AutoRun_FixPrivilegeIfNeeded();
+void AutoRun_FixTaskIfNeeded();
 
 void AutoRun_MigrateIfNeeded();

@@ -1,6 +1,7 @@
 #include "include/configs/outbounds/wireguard.h"
 
 #include <QJsonArray>
+#include <QRegularExpression>
 #include <QUrlQuery>
 #include <include/global/Utils.hpp>
 
@@ -27,8 +28,8 @@ namespace Configs {
                 }
             }
         }
-        if (query.hasQueryItem("persistent_keepalive_interval")) persistent_keepalive = query.queryItemValue("persistent_keepalive_interval").toInt();
-        
+        if (query.hasQueryItem("persistent_keepalive_interval")) persistent_keepalive = query.queryItemValue("persistent_keepalive_interval");
+
         return true;
     }
 
@@ -42,7 +43,10 @@ namespace Configs {
         if (object.contains("reserved")) {
             reserved = QJsonArray2QListInt(object["reserved"].toArray());
         }
-        if (object.contains("persistent_keepalive_interval")) persistent_keepalive = object["persistent_keepalive_interval"].toInt();
+        if (object.contains("persistent_keepalive_interval")) {
+            auto value = object["persistent_keepalive_interval"];
+            persistent_keepalive = value.isString() ? value.toString() : Int2String(value.toInt());
+        }
         return true;
     }
 
@@ -58,7 +62,7 @@ namespace Configs {
             }
             query.addQueryItem("reserved", reservedStr.join("-"));
         }
-        if (persistent_keepalive > 0) query.addQueryItem("persistent_keepalive_interval", QString::number(persistent_keepalive));
+        if (!persistent_keepalive.isEmpty()) query.addQueryItem("persistent_keepalive_interval", persistent_keepalive);
         return query.toString();
     }
 
@@ -70,7 +74,7 @@ namespace Configs {
         if (!public_key.isEmpty()) object["public_key"] = public_key;
         if (!pre_shared_key.isEmpty()) object["pre_shared_key"] = pre_shared_key;
         if (!reserved.isEmpty()) object["reserved"] = QListInt2QJsonArray(reserved);
-        if (persistent_keepalive > 0) object["persistent_keepalive_interval"] = persistent_keepalive;
+        WriteKeepalive(object);
         return object;
     }
 
@@ -82,9 +86,28 @@ namespace Configs {
         if (!public_key.isEmpty()) object["public_key"] = public_key;
         if (!pre_shared_key.isEmpty()) object["pre_shared_key"] = pre_shared_key;
         if (!reserved.isEmpty()) object["reserved"] = QListInt2QJsonArray(reserved);
-        if (persistent_keepalive > 0) object["persistent_keepalive_interval"] = persistent_keepalive;
+        WriteKeepalive(object);
         object["allowed_ips"] = QListStr2QJsonArray({"0.0.0.0/0", "::/0"});
         return {object, ""};
+    }
+
+    // A plain interval stays a JSON number so configs remain readable by
+    // standard WireGuard clients; only an AmneziaWG range needs a string.
+    // Anything that is neither is dropped rather than passed to the core, which
+    // would refuse to start the endpoint.
+    void Peer::WriteKeepalive(QJsonObject& object) const
+    {
+        if (persistent_keepalive.isEmpty()) return;
+        bool numeric = false;
+        int seconds = persistent_keepalive.toInt(&numeric);
+        if (numeric) {
+            if (seconds > 0) object["persistent_keepalive_interval"] = seconds;
+            return;
+        }
+        static const QRegularExpression rangeRe("^\\d+-\\d+$");
+        if (rangeRe.match(persistent_keepalive).hasMatch()) {
+            object["persistent_keepalive_interval"] = persistent_keepalive;
+        }
     }
 
     bool wireguard::ParseFromLink(const QString& link)
@@ -108,7 +131,7 @@ namespace Configs {
                 if (key == "MTU") mtu = value.toInt();
                 if (key == "PublicKey") peer->public_key = value;
                 if (key == "PresharedKey") peer->pre_shared_key = value;
-                if (key == "PersistentKeepalive") peer->persistent_keepalive = value.toInt();
+                if (key == "PersistentKeepalive") peer->persistent_keepalive = value;
                 if (key == "Endpoint") {
                     QStringList parts = value.split(":");
                     if (parts.size() >= 2) {
@@ -134,6 +157,13 @@ namespace Configs {
                 if (key == "I3") i3 = value, enable_amnezia = true;
                 if (key == "I4") i4 = value, enable_amnezia = true;
                 if (key == "I5") i5 = value, enable_amnezia = true;
+                if (key == "HeaderProtectionKey") header_protection_key = value, enable_amnezia = true;
+                if (key == "ContentPaddingAddition") content_padding_addition = value, enable_amnezia = true;
+                if (key == "RekeyAfterTime") rekey_after_time = value, enable_amnezia = true;
+                if (key == "RekeyTimeout") rekey_timeout = value, enable_amnezia = true;
+                if (key == "RejectAfterTime") reject_after_time = value, enable_amnezia = true;
+                if (key == "KeepaliveTimeout") keepalive_timeout = value, enable_amnezia = true;
+                if (key == "MaxHandshakeAttempts") max_handshake_attempts = value, enable_amnezia = true;
             }
             return !private_key.isEmpty() && !peer->public_key.isEmpty();
         }
@@ -175,6 +205,13 @@ namespace Configs {
         if (query.hasQueryItem("i3")) i3 = query.queryItemValue("i3"), enable_amnezia = true;
         if (query.hasQueryItem("i4")) i4 = query.queryItemValue("i4"), enable_amnezia = true;
         if (query.hasQueryItem("i5")) i5 = query.queryItemValue("i5"), enable_amnezia = true;
+        if (query.hasQueryItem("header_protection_key")) header_protection_key = query.queryItemValue("header_protection_key"), enable_amnezia = true;
+        if (query.hasQueryItem("content_padding_addition")) content_padding_addition = query.queryItemValue("content_padding_addition"), enable_amnezia = true;
+        if (query.hasQueryItem("rekey_after_time")) rekey_after_time = query.queryItemValue("rekey_after_time"), enable_amnezia = true;
+        if (query.hasQueryItem("rekey_timeout")) rekey_timeout = query.queryItemValue("rekey_timeout"), enable_amnezia = true;
+        if (query.hasQueryItem("reject_after_time")) reject_after_time = query.queryItemValue("reject_after_time"), enable_amnezia = true;
+        if (query.hasQueryItem("keepalive_timeout")) keepalive_timeout = query.queryItemValue("keepalive_timeout"), enable_amnezia = true;
+        if (query.hasQueryItem("max_handshake_attempts")) max_handshake_attempts = query.queryItemValue("max_handshake_attempts"), enable_amnezia = true;
         FixAddress();
 
         return !(private_key.isEmpty() || peer->public_key.isEmpty() || server.isEmpty());
@@ -231,6 +268,13 @@ namespace Configs {
             if (!i3.isEmpty()) query.addQueryItem("i3", i3);
             if (!i4.isEmpty()) query.addQueryItem("i4", i4);
             if (!i5.isEmpty()) query.addQueryItem("i5", i5);
+            if (!header_protection_key.isEmpty()) query.addQueryItem("header_protection_key", header_protection_key);
+            if (!content_padding_addition.isEmpty()) query.addQueryItem("content_padding_addition", content_padding_addition);
+            if (!rekey_after_time.isEmpty()) query.addQueryItem("rekey_after_time", rekey_after_time);
+            if (!rekey_timeout.isEmpty()) query.addQueryItem("rekey_timeout", rekey_timeout);
+            if (!reject_after_time.isEmpty()) query.addQueryItem("reject_after_time", reject_after_time);
+            if (!keepalive_timeout.isEmpty()) query.addQueryItem("keepalive_timeout", keepalive_timeout);
+            if (!max_handshake_attempts.isEmpty()) query.addQueryItem("max_handshake_attempts", max_handshake_attempts);
         }
 
         mergeUrlQuery(query, outbound::ExportToLink());
@@ -313,6 +357,11 @@ namespace Configs {
         return "WireGuard";
     }
 
+    SecurityInfo wireguard::GetSecurity()
+    {
+        return {QObject::tr("Encrypted"), enable_amnezia ? "AmneziaWG" : QString(), SecurityLevel::Secure};
+    }
+
     bool wireguard::IsEndpoint()
     {
         return true;
@@ -338,6 +387,13 @@ namespace Configs {
         if (!i3.isEmpty()) object["i3"] = i3;
         if (!i4.isEmpty()) object["i4"] = i4;
         if (!i5.isEmpty()) object["i5"] = i5;
+        if (!header_protection_key.isEmpty()) object["header_protection_key"] = header_protection_key;
+        if (!content_padding_addition.isEmpty()) object["content_padding_addition"] = content_padding_addition;
+        if (!rekey_after_time.isEmpty()) object["rekey_after_time"] = rekey_after_time;
+        if (!rekey_timeout.isEmpty()) object["rekey_timeout"] = rekey_timeout;
+        if (!reject_after_time.isEmpty()) object["reject_after_time"] = reject_after_time;
+        if (!keepalive_timeout.isEmpty()) object["keepalive_timeout"] = keepalive_timeout;
+        if (!max_handshake_attempts.isEmpty()) object["max_handshake_attempts"] = max_handshake_attempts;
         return object;
     }
 
@@ -361,6 +417,19 @@ namespace Configs {
         if (object.contains("i3")) i3 = object["i3"].toString();
         if (object.contains("i4")) i4 = object["i4"].toString();
         if (object.contains("i5")) i5 = object["i5"].toString();
+        if (object.contains("header_protection_key")) header_protection_key = object["header_protection_key"].toString();
+        if (object.contains("content_padding_addition")) content_padding_addition = AmneziaRangeFromJson(object["content_padding_addition"]);
+        if (object.contains("rekey_after_time")) rekey_after_time = AmneziaRangeFromJson(object["rekey_after_time"]);
+        if (object.contains("rekey_timeout")) rekey_timeout = AmneziaRangeFromJson(object["rekey_timeout"]);
+        if (object.contains("reject_after_time")) reject_after_time = AmneziaRangeFromJson(object["reject_after_time"]);
+        if (object.contains("keepalive_timeout")) keepalive_timeout = AmneziaRangeFromJson(object["keepalive_timeout"]);
+        if (object.contains("max_handshake_attempts")) max_handshake_attempts = AmneziaRangeFromJson(object["max_handshake_attempts"]);
+    }
+
+    // Ranges are written as strings, but sing-box also accepts a bare number.
+    QString wireguard::AmneziaRangeFromJson(const QJsonValue& value)
+    {
+        return value.isString() ? value.toString() : Int2String(value.toInt());
     }
 
     void wireguard::FixAddress() {

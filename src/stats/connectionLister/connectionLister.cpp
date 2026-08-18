@@ -1,13 +1,25 @@
 #include <QThread>
+#include <QDateTime>
 #include <core/server/gen/libcore.pb.h>
 #include <include/api/RPC.h>
 #include "include/ui/mainwindow_interface.h"
 #include <include/stats/connections/connectionLister.hpp>
+#include "include/stats/traffic/TrafficStatsManager.hpp"
 
 
 
 namespace Stats
 {
+    // Ignore samples taken closer together than this when deriving a rate, so
+    // out-of-band ForceUpdate() polls (e.g. on a header click) don't divide a
+    // tiny byte delta by a tiny interval and produce a misleading spike.
+    static constexpr qint64 kSpeedSampleMinMs = 500;
+
+    // Poll cadence: 1 Hz while the connections view is visible, relaxed otherwise
+    // (off-view polls only keep the per-app traffic stats sampled).
+    static constexpr unsigned long kActivePollMs = 1000;
+    static constexpr unsigned long kRelaxedPollMs = 5000;
+
     ConnectionLister* connection_lister = new ConnectionLister();
 
     ConnectionLister::ConnectionLister()
@@ -28,8 +40,16 @@ namespace Stats
         while (true)
         {
             if (stop) return;
-            QThread::msleep(1000);
 
+            {
+                // Sleep until the next poll, but wake immediately when the view
+                // opens (SetInView) or we're shutting down (stopLoop). 1 Hz while
+                // visible; relaxed otherwise.
+                QMutexLocker wlk(&waitMu_);
+                waitCond_.wait(&waitMu_, inView_.load() ? kActivePollMs : kRelaxedPollMs);
+            }
+
+            if (stop) return;
             if (suspend || !Configs::dataManager->settingsRepo->enable_stats) continue;
 
             mu.lock();
@@ -38,28 +58,86 @@ namespace Stats
         }
     }
 
+    void ConnectionLister::SetInView(bool inView)
+    {
+        const bool was = inView_.exchange(inView);
+        if (inView && !was)
+        {
+            // Became visible: wake the loop so it switches to 1 Hz and refreshes
+            // now instead of waiting out the remaining relaxed sleep.
+            QMutexLocker wlk(&waitMu_);
+            waitCond_.wakeAll();
+        }
+    }
+
+    // Map one wire connection into the in-memory metadata used by the UI table.
+    static ConnectionMetadata metaFromProto(const libcore::ConnectionMetaData& conn)
+    {
+        ConnectionMetadata c;
+        c.id = QString::fromStdString(conn.id.value());
+        c.createdAtMs = conn.created_at.value();
+        c.dest = QString::fromStdString(conn.dest.value());
+        c.upload = conn.upload.value();
+        c.download = conn.download.value();
+        c.domain = QString::fromStdString(conn.domain.value());
+        c.network = QString::fromStdString(conn.network.value());
+        c.outbound = QString::fromStdString(conn.outbound.value());
+        c.process = QString::fromStdString(conn.process.value());
+        c.processPath = QString::fromStdString(conn.process_path.value());
+        c.protocol = QString::fromStdString(conn.protocol.value());
+        c.closedAtMs = conn.closed_at.value();
+        return c;
+    }
+
     void ConnectionLister::update()
     {
-        libcore::ListConnectionsResp resp = API::defaultClient->ListConnections();
+        libcore::QueryConnectionsResp resp = API::defaultClient->QueryConnections();
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 
         QMap<QString, ConnectionMetadata> toUpdate;
         QMap<QString, ConnectionMetadata> toAdd;
         QSet<QString> newState;
         QList<ConnectionMetadata> sorted;
-        auto conns = resp.connections;
-        for (auto conn : conns)
+        QHash<QString, SpeedSample> newSamples;
+        for (const auto& conn : resp.active)
         {
-            auto c = ConnectionMetadata();
-            c.id = QString(conn.id.value().c_str());
-            c.createdAtMs = conn.created_at.value();
-            c.dest = QString(conn.dest.value().c_str());
-            c.upload = conn.upload.value();
-            c.download = conn.download.value();
-            c.domain = QString(conn.domain.value().c_str());
-            c.network = QString(conn.network.value().c_str());
-            c.outbound = QString(conn.outbound.value().c_str());
-            c.process = QString(conn.process.value().c_str());
-            c.protocol = QString(conn.protocol.value().c_str());
+            auto c = metaFromProto(conn);
+
+            // Derive an instantaneous rate by diffing this connection's
+            // cumulative byte counters against its previous sample. When polls
+            // arrive faster than the sampling window, carry the last rate and
+            // baseline forward unchanged so the number stays stable.
+            SpeedSample s;
+            if (const auto it = speedSamples_.constFind(c.id); it != speedSamples_.constEnd())
+            {
+                const qint64 dt = nowMs - it->sampledAtMs;
+                if (dt >= kSpeedSampleMinMs)
+                {
+                    qint64 dUp = c.upload - it->upload;
+                    qint64 dDown = c.download - it->download;
+                    if (dUp < 0) dUp = 0; // counters only grow; guard against any reset
+                    if (dDown < 0) dDown = 0;
+                    s.upload = c.upload;
+                    s.download = c.download;
+                    s.sampledAtMs = nowMs;
+                    s.upSpeed = dUp * 1000 / dt;
+                    s.downSpeed = dDown * 1000 / dt;
+                }
+                else
+                {
+                    s = *it; // window too short: keep last rate and baseline
+                }
+            }
+            else
+            {
+                s.upload = c.upload; // first sighting: seed baseline, no rate yet
+                s.download = c.download;
+                s.sampledAtMs = nowMs;
+            }
+            newSamples.insert(c.id, s);
+            c.uploadSpeed = s.upSpeed;
+            c.downloadSpeed = s.downSpeed;
+
             if (sort == Default)
             {
                 if (state->contains(c.id))
@@ -75,9 +153,58 @@ namespace Stats
             }
             newState.insert(c.id);
         }
+        speedSamples_ = newSamples; // drop ids for connections that have closed
 
         state->clear();
         for (const auto& id : newState) state->insert(id);
+
+        // One enriched poll, two consumers: the connection table above, and the
+        // per-app traffic module here. Diff each connection's cumulative byte
+        // counters across the live set plus the recently-closed ring (deduped by
+        // id), so a connection that opened and closed between polls is still
+        // counted. Gated by the traffic-stats toggle; the lister itself already
+        // requires connection stats (enable_stats) to run.
+        if (!Configs::dataManager->settingsRepo->disable_traffic_stats)
+        {
+            QHash<QString, QPair<qint64, qint64>> newLast;
+            QSet<QString> currentClosed;
+
+            auto credit = [&](const libcore::ConnectionMetaData& cm, qint64 curUp, qint64 curDown)
+            {
+                const QString id = QString::fromStdString(cm.id.value());
+                qint64 baseUp = 0, baseDown = 0;
+                if (const auto it = lastBytes_.constFind(id); it != lastBytes_.constEnd())
+                {
+                    baseUp = it->first;
+                    baseDown = it->second;
+                }
+                qint64 dUp = curUp - baseUp;
+                qint64 dDown = curDown - baseDown;
+                if (dUp < 0) dUp = 0; // counters only grow; guard against any reset
+                if (dDown < 0) dDown = 0;
+                if (dUp == 0 && dDown == 0) return;
+                QString name = QString::fromStdString(cm.process.value());
+                if (name.isEmpty()) name = "Unknown";
+                trafficStatsManager->AddAppDelta(name, QString::fromStdString(cm.process_path.value()), dUp, dDown);
+            };
+
+            for (const auto& cm : resp.active)
+            {
+                const qint64 up = cm.upload.value();
+                const qint64 down = cm.download.value();
+                credit(cm, up, down);
+                newLast.insert(QString::fromStdString(cm.id.value()), {up, down});
+            }
+            for (const auto& cm : resp.closed)
+            {
+                const QString id = QString::fromStdString(cm.id.value());
+                currentClosed.insert(id);
+                if (accountedClosed_.contains(id)) continue;
+                credit(cm, cm.upload.value(), cm.download.value());
+            }
+            lastBytes_ = newLast;             // drop evicted / now-closed live ids
+            accountedClosed_ = currentClosed; // everything in the ring is accounted
+        }
 
         if (sort == Default)
         {
@@ -127,6 +254,40 @@ namespace Stats
                         return asc ? a.protocol > b.protocol : a.protocol < b.protocol;
                     });
             }
+            if (sort == ByTraffic)
+            {
+                std::sort(sorted.begin(), sorted.end(), [=,this](const ConnectionMetadata& a, const ConnectionMetadata& b)
+                    {
+                        const long long ta = a.upload + a.download, tb = b.upload + b.download;
+                        if (ta == tb) return asc ? a.id > b.id : a.id < b.id;
+                        return asc ? ta < tb : ta > tb;
+                    });
+            }
+            if (sort == ByDownloadSpeed)
+            {
+                std::sort(sorted.begin(), sorted.end(), [=,this](const ConnectionMetadata& a, const ConnectionMetadata& b)
+                    {
+                        if (a.downloadSpeed == b.downloadSpeed) return asc ? a.id > b.id : a.id < b.id;
+                        return asc ? a.downloadSpeed < b.downloadSpeed : a.downloadSpeed > b.downloadSpeed;
+                    });
+            }
+            if (sort == ByUploadSpeed)
+            {
+                std::sort(sorted.begin(), sorted.end(), [=,this](const ConnectionMetadata& a, const ConnectionMetadata& b)
+                    {
+                        if (a.uploadSpeed == b.uploadSpeed) return asc ? a.id > b.id : a.id < b.id;
+                        return asc ? a.uploadSpeed < b.uploadSpeed : a.uploadSpeed > b.uploadSpeed;
+                    });
+            }
+            if (sort == BySpeed)
+            {
+                std::sort(sorted.begin(), sorted.end(), [=,this](const ConnectionMetadata& a, const ConnectionMetadata& b)
+                    {
+                        const long long sa = a.uploadSpeed + a.downloadSpeed, sb = b.uploadSpeed + b.downloadSpeed;
+                        if (sa == sb) return asc ? a.id > b.id : a.id < b.id;
+                        return asc ? sa < sb : sa > sb;
+                    });
+            }
             runOnUiThread([=,this] {
                 auto m = GetMainWindow();
                 m->UpdateConnectionListWithRecreate(sorted);
@@ -137,38 +298,14 @@ namespace Stats
     void ConnectionLister::stopLoop()
     {
         stop = true;
+        QMutexLocker wlk(&waitMu_);
+        waitCond_.wakeAll(); // break the poll sleep so the loop exits promptly
     }
 
     void ConnectionLister::setSort(const ConnectionSort newSort)
     {
-        if (newSort == ByTraffic)
-        {
-            if (sort == ByDownload && asc)
-            {
-                sort = ByUpload;
-                asc = false;
-                return;
-            }
-            if (sort == ByUpload && asc)
-            {
-                sort = ByDownload;
-                asc = false;
-                return;
-            }
-            if (sort == ByDownload)
-            {
-                asc = true;
-                return;
-            }
-            if (sort == ByUpload)
-            {
-                asc = true;
-                return;
-            }
-            sort = ByDownload;
-            asc = false;
-            return;
-        }
+        // Re-selecting the active field flips its direction; a new field starts
+        // descending (largest / most-recent first).
         if (sort == newSort) asc = !asc;
         else
         {

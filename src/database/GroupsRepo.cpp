@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QMutexLocker>
+#include <QSet>
 
 #include "include/database/ProfilesRepo.h"
 #include "include/global/Configs.hpp"
@@ -35,10 +36,14 @@ namespace Configs {
                 test_sort_by INTEGER NOT NULL DEFAULT 0,
                 traffic_sort_by INTEGER NOT NULL DEFAULT 0,
                 test_items_to_show INTEGER NOT NULL DEFAULT 0,
+                type_sort_by INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
                 updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
         )");
+        // Migrate existing databases created before type_sort_by was added.
+        if (!groupsColumnExists("type_sort_by"))
+            db.exec("ALTER TABLE groups ADD COLUMN type_sort_by INTEGER NOT NULL DEFAULT 0");
 
         // Create groups_order table to store UI tab order
         db.exec(R"(
@@ -47,6 +52,15 @@ namespace Configs {
                 display_order INTEGER NOT NULL
             )
         )");
+    }
+
+    bool GroupsRepo::groupsColumnExists(const char* columnName) const {
+        auto pragma = db.query("PRAGMA table_info(groups)");
+        if (!pragma) return false;
+        while (pragma->executeStep()) {
+            if (pragma->getColumn(1).getText() == std::string(columnName)) return true;
+        }
+        return false;
     }
 
     QJsonObject GroupsRepo::groupToJson(const Group* group) const {
@@ -67,8 +81,9 @@ namespace Configs {
         json["scroll_last_profile"] = group->scroll_last_profile;
         json["test_sort_by"] = static_cast<int>(group->test_sort_by);
         json["traffic_sort_by"] = static_cast<int>(group->traffic_sort_by);
+        json["type_sort_by"] = static_cast<int>(group->type_sort_by);
         json["test_items_to_show"] = static_cast<int>(group->test_items_to_show);
-        
+
         return json;
     }
 
@@ -90,6 +105,7 @@ namespace Configs {
         group->scroll_last_profile = json["scroll_last_profile"].toInt(-1);
         group->test_sort_by = static_cast<testBy>(json["test_sort_by"].toInt(0));
         group->traffic_sort_by = static_cast<trafficBy>(json["traffic_sort_by"].toInt(0));
+        group->type_sort_by = static_cast<typeBy>(json["type_sort_by"].toInt(0));
         group->test_items_to_show = static_cast<testShowItems>(json["test_items_to_show"].toInt(0));
         
         return group;
@@ -106,71 +122,50 @@ namespace Configs {
         QString columnWidthJson = QString::fromUtf8(columnWidthDoc.toJson(QJsonDocument::Compact));
         QString profilesJson = QString::fromUtf8(profilesDoc.toJson(QJsonDocument::Compact));
         
-        // Check if group exists
-        auto checkQuery = db.query("SELECT id FROM groups WHERE id = ?", id);
-        bool exists = checkQuery && checkQuery->executeStep();
-        
-        if (exists) {
-            // Update
-            db.exec(R"(
-                UPDATE groups 
-                SET archive = ?, skip_auto_update = ?, auto_clear_unavailable = ?, name = ?, url = ?, info = ?,
-                    sub_last_update = ?, front_proxy_id = ?, landing_proxy_id = ?,
-                    column_width_json = ?, profiles_json = ?, scroll_last_profile = ?, test_sort_by = ?, traffic_sort_by = ?, test_items_to_show = ?,
-                    updated_at = strftime('%s', 'now')
-                WHERE id = ?
-            )",
-                group->archive ? 1 : 0,
-                group->skip_auto_update ? 1 : 0,
-                group->auto_clear_unavailable ? 1 : 0,
-                group->name.toStdString(),
-                group->url.toStdString(),
-                group->info.toStdString(),
-                static_cast<long long>(group->sub_last_update),
-                group->front_proxy_id,
-                group->landing_proxy_id,
-                columnWidthJson.toStdString(),
-                profilesJson.toStdString(),
-                group->scroll_last_profile,
-                static_cast<int>(group->test_sort_by),
-                static_cast<int>(group->traffic_sort_by),
-                static_cast<int>(group->test_items_to_show),
-                id
-            );
-        } else {
-            // Insert
-            db.exec(R"(
-                INSERT INTO groups 
-                (id, archive, skip_auto_update, auto_clear_unavailable, name, url, info, sub_last_update,
-                 front_proxy_id, landing_proxy_id,
-                 column_width_json, profiles_json, scroll_last_profile, test_sort_by, traffic_sort_by, test_items_to_show)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            )",
-                id,
-                group->archive ? 1 : 0,
-                group->skip_auto_update ? 1 : 0,
-                group->auto_clear_unavailable ? 1 : 0,
-                group->name.toStdString(),
-                group->url.toStdString(),
-                group->info.toStdString(),
-                static_cast<long long>(group->sub_last_update),
-                group->front_proxy_id,
-                group->landing_proxy_id,
-                columnWidthJson.toStdString(),
-                profilesJson.toStdString(),
-                group->scroll_last_profile,
-                static_cast<int>(group->test_sort_by),
-                static_cast<int>(group->traffic_sort_by),
-                static_cast<int>(group->test_items_to_show)
-            );
-        }
+        db.exec(R"(
+            INSERT INTO groups
+            (id, archive, skip_auto_update, auto_clear_unavailable, name, url, info, sub_last_update,
+             front_proxy_id, landing_proxy_id,
+             column_width_json, profiles_json, scroll_last_profile, test_sort_by, traffic_sort_by, test_items_to_show,
+             type_sort_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                archive = excluded.archive, skip_auto_update = excluded.skip_auto_update,
+                auto_clear_unavailable = excluded.auto_clear_unavailable, name = excluded.name,
+                url = excluded.url, info = excluded.info, sub_last_update = excluded.sub_last_update,
+                front_proxy_id = excluded.front_proxy_id, landing_proxy_id = excluded.landing_proxy_id,
+                column_width_json = excluded.column_width_json, profiles_json = excluded.profiles_json,
+                scroll_last_profile = excluded.scroll_last_profile, test_sort_by = excluded.test_sort_by,
+                traffic_sort_by = excluded.traffic_sort_by, test_items_to_show = excluded.test_items_to_show,
+                type_sort_by = excluded.type_sort_by,
+                updated_at = strftime('%s', 'now')
+        )",
+            id,
+            group->archive ? 1 : 0,
+            group->skip_auto_update ? 1 : 0,
+            group->auto_clear_unavailable ? 1 : 0,
+            group->name.toStdString(),
+            group->url.toStdString(),
+            group->info.toStdString(),
+            static_cast<long long>(group->sub_last_update),
+            group->front_proxy_id,
+            group->landing_proxy_id,
+            columnWidthJson.toStdString(),
+            profilesJson.toStdString(),
+            group->scroll_last_profile,
+            static_cast<int>(group->test_sort_by),
+            static_cast<int>(group->traffic_sort_by),
+            static_cast<int>(group->test_items_to_show),
+            static_cast<int>(group->type_sort_by)
+        );
     }
 
     std::shared_ptr<Group> GroupsRepo::loadFromDatabase(int id) const {
         auto query = db.query(R"(
             SELECT id, archive, skip_auto_update, auto_clear_unavailable, name, url, info, sub_last_update,
                    front_proxy_id, landing_proxy_id,
-                   column_width_json, profiles_json, scroll_last_profile, test_sort_by, traffic_sort_by, test_items_to_show
+                   column_width_json, profiles_json, scroll_last_profile, test_sort_by, traffic_sort_by, test_items_to_show,
+                   type_sort_by
             FROM groups WHERE id = ?
         )", id);
         if (!query || !query->executeStep()) {
@@ -210,8 +205,26 @@ namespace Configs {
         json["test_sort_by"] = query->getColumn(13).getInt();
         json["traffic_sort_by"] = query->getColumn(14).getInt();
         json["test_items_to_show"] = query->getColumn(15).getInt();
-        
-        return groupFromJson(json);
+        json["type_sort_by"] = query->getColumn(16).getInt();
+
+        auto group = groupFromJson(json);
+        // Refreshes used to map several identical servers onto one id, leaving
+        // that id in the list once per server. The list is persisted whole, so
+        // an affected group stays broken until it is repaired here (#1775).
+        QSet<int> seen;
+        QList<int> unique;
+        unique.reserve(group->profiles.size());
+        for (int pid : group->profiles) {
+            if (seen.contains(pid)) continue;
+            seen.insert(pid);
+            unique.append(pid);
+        }
+        if (unique.size() != group->profiles.size()) {
+            group->profiles = std::move(unique);
+            // The caller (GetGroup) already holds the mutex, so write straight through.
+            saveToDatabase(group.get(), group->id);
+        }
+        return group;
     }
 
     std::shared_ptr<Group> GroupsRepo::NewGroup() {

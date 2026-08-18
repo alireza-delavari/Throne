@@ -88,9 +88,12 @@ namespace Configs {
         admin = Windows_IsInAdmin();
         Configs::dataManager->settingsRepo->windows_set_admin = admin;
 #else
+        // Unknown until the core answers; caching that would pin "not elevated" for the session.
+        if (API::defaultClient == nullptr) return false;
         bool ok;
-        auto isPrivileged = API::defaultClient->IsPrivileged(&ok);
-        admin = ok && isPrivileged;
+        const auto isPrivileged = API::defaultClient->IsPrivileged(&ok);
+        if (!ok) return false;
+        admin = isPrivileged;
 #endif
         isAdminCache = admin;
         return admin;

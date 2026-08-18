@@ -131,6 +131,7 @@ namespace Configs_network {
             }
             accessManager.setProxy(p);
         }
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         if (Configs::dataManager->settingsRepo->net_insecure) {
             QSslConfiguration c;
             c.setPeerVerifyMode(QSslSocket::PeerVerifyMode::VerifyNone);
@@ -160,21 +161,40 @@ namespace Configs_network {
             GetMainWindow()->setDownloadReport({}, false);
             GetMainWindow()->UpdateDataView(true);
         });
+        auto netErr = _reply->error();
+        const QString netErrStr = _reply->errorString();
+        const int httpStatus = _reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = _reply->readAll();
         _reply->deleteLater();
-        if(_reply->error() != QNetworkReply::NetworkError::NoError) {
-            return _reply->errorString();
+
+        if (netErr != QNetworkReply::NetworkError::NoError) {
+            return netErrStr;
         }
 
-        auto filePath = Configs::GetBasePath()+ "/" + fileName;
-        auto file = QFile(filePath);
-        if (file.exists()) {
-            file.remove();
+        if (httpStatus != 0 && (httpStatus < 200 || httpStatus >= 300)) {
+            return QObject::tr("Download failed: server returned HTTP status %1.").arg(httpStatus);
         }
-        if (!file.open(QIODevice::WriteOnly)) {
+        if (body.isEmpty()) {
+            return QObject::tr("Download failed: the server returned an empty response.");
+        }
+
+        const auto filePath = Configs::GetBasePath() + "/" + fileName;
+        const auto tmpPath = filePath + ".tmp";
+        QFile tmp(tmpPath);
+        if (!tmp.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             return QObject::tr("Could not open file.");
         }
-        file.write(_reply->readAll());
-        file.close();
+        if (tmp.write(body) != body.size() || !tmp.flush()) {
+            tmp.close();
+            tmp.remove();
+            return QObject::tr("Could not write file.");
+        }
+        tmp.close();
+        QFile::remove(filePath);
+        if (!tmp.rename(filePath)) {
+            tmp.remove();
+            return QObject::tr("Could not save downloaded file.");
+        }
         return "";
     }
 

@@ -1,4 +1,5 @@
 #include "include/ui/utils/ProfilesTableVerticalHeader.h"
+#include "include/ui/utils/ProfilesFilterProxyModel.h"
 #include "include/ui/utils/ProfilesTableModel.h"
 #include <QPainter>
 #include <QTableView>
@@ -9,22 +10,28 @@ ProfilesTableVerticalHeader::ProfilesTableVerticalHeader(QWidget *parent)
     setSectionsClickable(true);
 }
 
-void ProfilesTableVerticalHeader::setProfilesModel(ProfilesTableModel *model) {
-    if (m_model == model) return;
-    if (m_model) {
-        disconnect(m_model, nullptr, this, nullptr);
-    }
+void ProfilesTableVerticalHeader::setProfilesModel(ProfilesTableModel *model, ProfilesFilterProxyModel *proxy) {
+    if (m_model == model && m_proxy == proxy) return;
+    if (m_model) disconnect(m_model, nullptr, this, nullptr);
+    if (m_proxy) disconnect(m_proxy, nullptr, this, nullptr);
     m_model = model;
+    m_proxy = proxy;
     if (m_model) {
         connect(m_model, &ProfilesTableModel::dataChanged, this, [this](const QModelIndex &topLeft, const QModelIndex &bottomRight) {
             for (int r = topLeft.row(); r <= bottomRight.row(); ++r) {
-                updateSection(r);
+                // dataChanged carries source rows; sections are numbered by the proxy.
+                const int section = m_proxy ? m_proxy->toProxyRow(r) : r;
+                if (section >= 0) updateSection(section);
             }
         });
         connect(m_model, &ProfilesTableModel::modelReset, this, [this]() {
             updateWidthFromRowCount();
             update();
         });
+    }
+    if (m_proxy) {
+        connect(m_proxy, &QAbstractItemModel::rowsInserted, this, [this] { update(); });
+        connect(m_proxy, &QAbstractItemModel::rowsRemoved, this, [this] { update(); });
     }
     updateWidthFromRowCount();
     update();
@@ -50,7 +57,9 @@ void ProfilesTableVerticalHeader::paintSection(QPainter *painter, const QRect &r
     }
     QString text;
     if (m_model) {
-        text = m_model->rowLabel(logicalIndex);
+        // logicalIndex counts visible rows; the model is indexed by source row.
+        const int sourceRow = m_proxy ? m_proxy->toSourceRow(logicalIndex) : logicalIndex;
+        text = m_model->rowLabel(sourceRow, logicalIndex);
     } else {
         text = QString::number(logicalIndex + 1) + QStringLiteral("  ");
     }

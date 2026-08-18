@@ -17,9 +17,6 @@ namespace Configs {
         // Identity map: id -> weak_ptr<Profile>
         mutable std::map<int, std::weak_ptr<Profile>> identityMap;
 
-        // Helper to serialize Profile to JSON
-        QJsonObject profileToJson(const Profile* profile) const;
-        
         // Helper to deserialize Profile from JSON
         std::shared_ptr<Profile> profileFromJson(const QJsonObject& json) const;
         
@@ -40,6 +37,9 @@ namespace Configs {
         
         // Create tables if they don't exist
         void createTables() const;
+
+        // True if the profiles table already has the given column (for migrations).
+        bool profilesColumnExists(const char* columnName) const;
 
         // Get next available profile ID (single)
         int NewProfileID() const;
@@ -76,6 +76,10 @@ namespace Configs {
         
         // Get all profile IDs in order
         QList<int> GetAllProfileIds() const;
+
+        // Ids of every profile of one type. Profiles are loaded lazily, so this
+        // asks the database rather than walking (and materialising) the lot.
+        QList<int> GetProfileIdsByType(const QString& type) const;
         
         // Save profile to database (manual save, like old Save() method)
         // Only saves if profile has a valid ID (id >= 0)
@@ -83,6 +87,8 @@ namespace Configs {
 
         // Update only the traffic field of the profile in the database (no existence check, just UPDATE).
         bool SaveTraffic(const std::shared_ptr<Profile>& profile);
+
+        void SaveTrafficBatch(const QList<std::shared_ptr<Profile>>& profiles);
 
         // Batch save: runs on a new thread, filters to non-null and id >= 0, then batch replace (same chunking as AddProfileBatch).
         void SaveBatch(const QList<std::shared_ptr<Profile>>& profiles);

@@ -102,7 +102,7 @@ void GroupItem::refresh_data() {
 }
 
 void GroupItem::on_update_sub_clicked() {
-    Subscription::groupUpdater->AsyncUpdate(ent->url, ent->id);
+    Subscription::groupUpdater->AsyncUpdate(ent->url, ent->id, nullptr, true);
 }
 
 void GroupItem::on_edit_clicked() {

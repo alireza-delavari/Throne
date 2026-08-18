@@ -59,6 +59,11 @@ DialogVPNSettings::DialogVPNSettings(QWidget *parent) : QDialog(parent), ui(new 
     ui->tun_routing->setChecked(Configs::dataManager->settingsRepo->enable_tun_routing);
     ui->tun_ipv4_cidr->setText(Configs::dataManager->settingsRepo->vpn_tun_ipv4_cidr);
     ui->tun_ipv6_cidr->setText(Configs::dataManager->settingsRepo->vpn_tun_ipv6_cidr);
+    ui->disable_priv_range->setChecked(Configs::dataManager->settingsRepo->disable_private_range_bypass);
+    ui->auto_redirect->setChecked(Configs::dataManager->settingsRepo->vpn_auto_redirect);
+#ifndef Q_OS_LINUX
+    ui->auto_redirect->hide();
+#endif
     ADJUST_SIZE
 }
 
@@ -88,6 +93,8 @@ void DialogVPNSettings::accept() {
     Configs::dataManager->settingsRepo->enable_tun_routing = ui->tun_routing->isChecked();
     Configs::dataManager->settingsRepo->vpn_tun_ipv4_cidr = tunIPv4CIDR;
     Configs::dataManager->settingsRepo->vpn_tun_ipv6_cidr = tunIPv6CIDR;
+    Configs::dataManager->settingsRepo->disable_private_range_bypass = ui->disable_priv_range->isChecked();
+    Configs::dataManager->settingsRepo->vpn_auto_redirect = ui->auto_redirect->isChecked();
     //
     MW_dialog_message(MwMessage::UpdateSettings, {MwArg::Vpn});
     QDialog::accept();

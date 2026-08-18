@@ -8,7 +8,4 @@ mkdir -p $DEST
 cp $GITHUB_WORKSPACE/build/Throne.exe $DEST
 cp $GITHUB_WORKSPACE/build/Throne.pdb $DEST || true
 
-cd download-artifact
-cd *$DEST_SUFFIX
-tar xvzf artifacts.tgz -C ../../
-cd ../..
+source "$(dirname "$0")/extract_core_artifact.sh"

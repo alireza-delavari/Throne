@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Form</string>
+   <string notr="true">Form</string>
   </property>
   <layout class="QGridLayout" name="gridLayout">
    <item row="5" column="0">
@@ -107,6 +107,15 @@
    </item>
   </layout>
  </widget>
+ <tabstops>
+  <tabstop>uuid</tabstop>
+  <tabstop>password</tabstop>
+  <tabstop>congestion_control</tabstop>
+  <tabstop>udp_relay_mode</tabstop>
+  <tabstop>udp_over_stream</tabstop>
+  <tabstop>zero_rtt</tabstop>
+  <tabstop>heartbeat</tabstop>
+ </tabstops>
  <resources/>
  <connections/>
 </ui>

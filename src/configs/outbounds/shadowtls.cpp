@@ -67,6 +67,13 @@ namespace Configs {
         return object;
     }
 
+    QJsonObject shadowtls::ExportIdentity()
+    {
+        auto object = outbound::ExportIdentity();
+        object["version"] = version;
+        return object;
+    }
+
     BuildResult shadowtls::Build()
     {
         QJsonObject object;

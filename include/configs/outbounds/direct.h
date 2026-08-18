@@ -7,6 +7,9 @@ namespace Configs {
     public:
         QString DisplayType() override { return QObject::tr("Direct"); }
 
+        // Not a tunneling protocol, so a security verdict would only mislead.
+        SecurityInfo GetSecurity() override { return {}; }
+
         QString DisplayAddress() override {
             if (!dialFields->bind_interface.isEmpty()) return "Bind NIC: " + dialFields->bind_interface;
             if (!dialFields->inet4_bind_address.isEmpty()) return "Bind Addr4: " + dialFields->inet4_bind_address;

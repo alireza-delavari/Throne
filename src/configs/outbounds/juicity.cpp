@@ -78,4 +78,9 @@ namespace Configs {
     {
         return "Juicity";
     }
+
+    SecurityInfo juicity::GetSecurity()
+    {
+        return SecurityFromTLS("QUIC");
+    }
 }

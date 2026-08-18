@@ -24,8 +24,18 @@ static QString desktopFilePath() {
     return dir + "/" + kDesktopId;
 }
 
+// "throne" is in no icon theme for the /opt and AppImage layouts, so unpack a copy
+// and reference it by absolute path.
+static QString iconTarget() {
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString path = dir + "/throne.png";
+    QDir().mkpath(dir);
+    QFile::remove(path);
+    return QFile::copy(":/Throne/Throne.png", path) ? path : QStringLiteral("throne");
+}
+
 QString UrlScheme_DesiredState() {
-    return execTarget();
+    return "v3|" + execTarget();
 }
 
 void UrlScheme_Apply() {
@@ -38,8 +48,9 @@ void UrlScheme_Apply() {
         ts << "[Desktop Entry]\n"
            << "Type=Application\n"
            << "Name=Throne\n"
-           << "Exec=\"" << execTarget() << "\" %u\n"
-           << "MimeType=x-scheme-handler/throne;\n"
+           << "Icon=" << iconTarget() << "\n"
+           << "Exec=\"" << execTarget() << "\" %U\n"
+           << "MimeType=x-scheme-handler/throne;application/json;application/yaml;text/yaml;text/plain;\n"
            << "Terminal=false\n"
            << "NoDisplay=true\n";
         ts.flush();

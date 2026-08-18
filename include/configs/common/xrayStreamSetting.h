@@ -8,6 +8,12 @@ namespace Configs {
     inline QStringList XrayXHTTPUplinkDataPlacements = {"", "auto", "body", "cookie", "header"};
     inline QStringList XrayXHTTPUplinkMethods = {"", "POST", "PUT", "PATCH", "GET"};
 
+    // Xray-style outbound domain strategy derived from the user's direct-DNS
+    // strategy (e.g. "UseIP", "UseIPv4v6"). Defined in xrayStreamSetting.cpp;
+    // passed to the core as LoadConfigReq.xray_outbound_dns_strategy so the live
+    // Xray instance resolves outbound server domains with it (ThroneWiring).
+    QString getXrayOutboundDomainStrategy();
+
     class xrayTLS : public baseConfig {
         public:
         QString serverName;
@@ -55,8 +61,10 @@ namespace Configs {
         QString xPaddingPlacement;
         QString xPaddingMethod;
         QString uplinkHTTPMethod;
-        QString sessionPlacement;
-        QString sessionKey;
+        QString sessionIDPlacement;
+        QString sessionIDKey;
+        QString sessionIDTable;
+        QString sessionIDLength;
         QString seqPlacement;
         QString seqKey;
         QString uplinkDataPlacement;
@@ -66,9 +74,9 @@ namespace Configs {
         bool noSSEHeader = false;
         QString scMaxEachPostBytes;
         QString scMinPostsIntervalMs;
-        QString scMaxBufferedPosts;
+        long long scMaxBufferedPosts;
         QString scStreamUpServerSecs;
-        QString serverMaxHeaderBytes;
+        int serverMaxHeaderBytes;
         // extra/xmux
         QJsonObject rawXmux;
         QString maxConcurrency;
@@ -150,6 +158,7 @@ namespace Configs {
         bool ParseFromClash(const clash::Proxies& object) override;
         QString ExportToLink() override;
         QJsonObject ExportToJson() override;
+        QJsonObject ExportIdentity() override;
         BuildResult Build() override;
     };
 }

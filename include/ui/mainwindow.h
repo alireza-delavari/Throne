@@ -18,12 +18,16 @@
 
 #include <QKeyEvent>
 #include <QSystemTrayIcon>
+#include <QPointer>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QQueue>
 #include <QWaitCondition>
 #include <QProcess>
 #include <QTextDocument>
 #include <QShortcut>
+#include <QKeySequence>
+#include <QSet>
 #include <QCheckBox>
 #include <QSemaphore>
 #include <QMutex>
@@ -34,6 +38,7 @@
 #include "group/GroupSort.hpp"
 #include "include/global/GuiUtils.hpp"
 #include "include/ui/utils/DataViewHtmlGenerator.h"
+#include "include/ui/utils/ProfilesFilterProxyModel.h"
 #include "include/ui/utils/ProfilesTableModel.h"
 #include "ui_mainwindow.h"
 
@@ -43,11 +48,30 @@ namespace Configs_sys {
     class CoreProcess;
 }
 
+class TrayProfileSelector;
+class TrayOtpCodes;
+class TestRunner;
+
+namespace Qv2ray::ui { class SyntaxHighlighter; }
+
 QT_BEGIN_NAMESPACE
 namespace Ui {
     class MainWindow;
 }
 QT_END_NAMESPACE
+
+enum class RefreshAnchor {
+    KeepPlace,
+    Removal,
+};
+
+enum class ExitReason {
+    None,
+    RunUpdater,
+    Restart,
+    RestartWithTun,
+    RestartWithDns,
+};
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -57,9 +81,13 @@ public:
 
     ~MainWindow() override;
 
+    qint64 GetCorePid();
+    QString GetRunningConfigName();
+
     void prepare_exit();
 
-    void refresh_proxy_list(const QList<int> &ids = {}, bool mayNeedReset = false);
+    void refresh_proxy_list(const QList<int> &ids = {}, bool mayNeedReset = false,
+                            RefreshAnchor anchor = RefreshAnchor::KeepPlace);
 
     void show_group(int gid);
 
@@ -73,13 +101,15 @@ public:
 
     void profile_stop(bool crash = false, bool block = false, bool manual = false);
 
+    int get_profile_to_start();
+
     void set_spmode_system_proxy(bool enable, bool save = true);
 
     void toggle_system_proxy();
 
     void set_spmode_vpn(bool enable, bool save = true);
 
-    bool get_elevated_permissions(int reason = 3);
+    bool get_elevated_permissions(ExitReason reason = ExitReason::RestartWithTun);
 
     void start_select_mode(QObject *context, const std::function<void(int)> &callback);
 
@@ -92,6 +122,10 @@ public:
     void UpdateConnectionListWithRecreate(const QList<Stats::ConnectionMetadata>& connections);
 
     void UpdateDataView(bool force = false);
+
+    void refresh_auto_selector_view();
+
+    class DialogAutoSelector *m_autoSelectorDialog = nullptr;
 
     void setDownloadReport(const DownloadProgressReport& report, bool show);
 
@@ -116,6 +150,10 @@ private slots:
     void on_menu_routing_settings_triggered();
 
     void on_menu_vpn_settings_triggered();
+
+    void on_menu_preset_settings_triggered();
+
+    void on_menu_otp_manager_triggered();
 
     void on_menu_hotkey_settings_triggered();
 
@@ -151,6 +189,8 @@ private slots:
 
     void on_menu_remove_invalid_triggered();
 
+    void on_menu_remove_insecure_triggered();
+
     void on_menu_resolve_selected_triggered();
 
     void on_menu_resolve_domain_triggered();
@@ -167,22 +207,25 @@ private slots:
 
 private:
     Ui::MainWindow *ui;
+    QElapsedTimer sinceWindowDeactivated;
     ProfilesTableModel *profilesTableModel = nullptr;
+
+    ProfilesFilterProxyModel *profilesFilterModel = nullptr;
     QSystemTrayIcon *tray;
-    QMenu *trayServerMenu = nullptr;
-    int trayServerPage = 0;
+    QMenu *trayMenu = nullptr;    // tray context menu
+    QPointer<TrayProfileSelector> traySelector;
+    void openTraySelector(bool routing);
+    QPointer<TrayOtpCodes> trayOtpCodes;
+    void openTrayOtpCodes();
     QShortcut *shortcut_esc = new QShortcut(QKeySequence::Cancel, this);
     //
     QThreadPool *parallelCoreCallPool = new QThreadPool(this);
-    std::atomic<bool> stopSpeedtest = false;
-    QMutex speedtestRunning;
-    std::atomic<bool> currentUnderTest = false;
+    std::unique_ptr<TestRunner> testRunner;
     //
     Configs_sys::CoreProcess *core_process = nullptr;
-    QMutex coreProcessMutex; // serializes core_process init (DS_cores) vs IPC newConnection (UI)
+    QMutex coreProcessMutex;
     QLocalServer *core_server = nullptr;
     bool rpc_started = false;
-    QMutex defaultClientMutex;
     qint64 vpn_pid = 0;
     //
     QTextDocument *qvLogDocument = new QTextDocument(this);
@@ -190,6 +233,10 @@ private:
     QString title_error;
     int icon_status = -1;
     std::shared_ptr<Configs::Profile> running;
+    int last_running_profile_id = -1;
+    bool m_profileConnecting = false;
+    bool m_profileDisconnecting = false;
+    bool m_xrayGeoAssetBusy = false;
     QString traffic_update_cache;
     qint64 last_test_time = 0;
     //
@@ -198,7 +245,7 @@ private:
     QMutex mu_starting;
     QMutex mu_stopping;
     QMutex mu_exit;
-    int exit_reason = 0;
+    ExitReason exit_reason = ExitReason::None;
     //
     QMutex mu_download_update;
     //
@@ -209,21 +256,22 @@ private:
     SpeedWidget *speedChartWidget;
     //
     // for data view
-    QDateTime lastUpdated = QDateTime::currentDateTime();
+    std::atomic<qint64> lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
     DataViewHtmlGenerator dataViewHtmlGenerator_;
 
     // shortcuts
     QList<QShortcut*> hiddenMenuShortcuts;
 
-    QStringList remoteRouteProfiles;
-    QMutex mu_remoteRouteProfiles;
-
     // search
-    bool searchEnabled = false;
     QString addressFilterString;
     QString nameFilterString;
     QString typeFilterString;
     QString countryFilterString;
+
+    QTimer *m_filterRefreshDebounce = nullptr;
+
+    bool m_profilesTableHadFocus = false;
+    int m_profilesScrollValue = 0;
 
     // log
     QStringList includeKeywords;
@@ -233,18 +281,38 @@ private:
     QMutex logMutex;
     QQueue<QString> logQueue;
     QWaitCondition logWaiter;
+    Qv2ray::ui::SyntaxHighlighter *logHighlighter = nullptr;
+
+    QMutex logPendingMutex;
+    QString logPendingText;
+    bool logFlushScheduled = false;
+
+    struct LogFilter {
+        bool enableInclude = false;
+        bool enableExclude = false;
+        QStringList includeKeywords;
+        QStringList excludeKeywords;
+        QRegularExpression includeCombined;
+        QRegularExpression excludeCombined;
+    };
 
     void append_log(const QString &log);
 
     void log_process_loop();
 
-    bool should_print_log(const QString &log);
+    // UI thread only.
+    void flush_log_batch();
+
+    bool should_print_log(const QString &log, const LogFilter &filter);
 
     void updateLogFilterFields();
 
-    QList<int> filterProfilesList(const QList<int>& profileIDs);
+    void setLogHighlighter(bool darkMode);
+
+    void applyProfileFilters();
 
     QList<int> get_now_selected_list();
+    void refresh_startstop_button();
 
     QList<int> get_selected_or_group();
 
@@ -252,7 +320,11 @@ private:
 
     void saveProfileFocusState();
 
-    void restoreProfileFocusState();
+    void restoreProfileFocusState(RefreshAnchor anchor);
+
+    void selectProfileRows(const QList<int> &rows);
+
+    void focusProfilesTable(bool selectFirst);
 
     void clearUnavailableProfiles(bool confirm = true, QList<int> profileIDs = {});
 
@@ -260,10 +332,12 @@ private:
 
     void handle_deeplink_impl(const QString &url);
 
-    void handle_addsub(const QString &url, const QString &name, bool autoUpdate);
+    void handle_addsub(const QString &url, const QString &name);
 
-    // Routes user-supplied text: throne:// links go to the deeplink handler, the
-    // rest to the subscription/profile importer.
+    void handle_import_route(const QString &url);
+
+    void handle_add_remote_routes(const QString &url);
+
     void import_or_handle_deeplink(const QString &text);
 
     void refresh_proxy_list_column_size();
@@ -274,13 +348,23 @@ private:
 
     void parseQrImage(const QPixmap *image);
 
+    void importFromFiles(const QStringList &paths);
+
+    void trayClickEvent();
+
     void keyPressEvent(QKeyEvent *event) override;
 
     void closeEvent(QCloseEvent *event) override;
 
     void changeEvent(QEvent *event) override;
 
+    void showEvent(QShowEvent *event) override;
+
+    void hideEvent(QHideEvent *event) override;
+
     void resizeEvent(QResizeEvent *event) override;
+
+    void syncConnectionViewState();
 
     void dragEnterEvent(QDragEnterEvent *event);
 
@@ -288,15 +372,22 @@ private:
 
     void applyLogBrowserFont();
 
-    // Debounced refresh_proxy_list trigger for font/theme/resize events.
+    void applyTopBarMetrics();
+
+    QSize designMinimumSize;
+
     QTimer *m_proxyListRefreshDebounce = nullptr;
     void scheduleProxyListRefresh();
+
+    bool m_adjustingColumns = false;
 
     //
 
     void HotkeyEvent(const QString &key);
 
     void RegisterHiddenMenuShortcuts(bool unregister = false);
+    void registerMenuShortcuts(QMenu *menu, QSet<QKeySequence> &claimed);
+    void collectMenuShortcuts(QMenu *menu, QSet<QKeySequence> &out);
 
     void setActionsData();
 
@@ -310,21 +401,17 @@ private:
 
     bool verify_core_pid(QLocalSocket *socket);
 
-    void urltest_current_group(const QList<int>& profileIDs);
+    void rank_auto_selector(const std::shared_ptr<Configs::Profile>& ent, const QList<int>& stale = {});
 
-    void iptest_current_group(const QList<int>& profileIDs);
+    void on_auto_selector_exhausted(int profileID);
 
-    void stopTests();
+    void on_subscription_group_changed(int gid, const QList<int>& disturbed);
 
-    void runURLTest(const QString& config, const QString& xrayConfig, bool useDefault, const QStringList& outboundTags, const QMap<QString, int>& tag2entID, int entID = -1);
+    bool auto_selector_ranked = false;
 
-    void runIPTest(const QString& config, const QString& xrayConfig, bool useDefault, const QStringList& outboundTags, const QMap<QString, int>& tag2entID, int entID = -1);
+    bool handleXrayGeoAssetError(const QString& error, const QString& contextName);
 
     void url_test_current();
-
-    void speedtest_current_group(const QList<int>& profileIDs, bool testCurrent = false);
-
-    void runSpeedTest(const QString& config, const QString& xrayConfig, bool useDefault, bool testCurrent, const QStringList& outboundTags, const QMap<QString, int>& tag2entID, int entID = -1);
 
     bool set_system_dns(bool set, bool save_set = true);
 
@@ -332,9 +419,9 @@ private:
 
     void setupConnectionList();
 
-    void querySpeedtest(const QMap<QString, int>& tag2entID, bool testCurrent);
+    void setupConnectionSortMenu();
 
-    void queryCountryTest(const QMap<QString, int>& tag2entID, bool testCurrent);
+    friend class TestRunner;
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;

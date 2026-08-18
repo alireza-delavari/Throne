@@ -36,6 +36,10 @@ namespace Configs
             return {};
         }
 
+        virtual QJsonObject ExportIdentity() {
+            return ExportToJson();
+        }
+
         virtual BuildResult Build() {
             return {{}, "base class function called!"};
         }

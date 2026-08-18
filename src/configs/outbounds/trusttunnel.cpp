@@ -100,4 +100,9 @@ namespace Configs {
     {
         return "TrustTunnel";
     }
+
+    SecurityInfo trusttunnel::GetSecurity()
+    {
+        return SecurityFromTLS(quic ? "QUIC" : QString());
+    }
 }

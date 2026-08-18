@@ -182,4 +182,28 @@ namespace Configs {
     {
         return "Shadowsocks";
     }
+
+    SecurityInfo shadowsocks::GetSecurity()
+    {
+        SecurityInfo info;
+        if (method.isEmpty() || method == "none") {
+            info.label = QObject::tr("Raw");
+            info.level = SecurityLevel::None;
+            return info;
+        }
+        // Pre-AEAD stream ciphers: no integrity, trivially detectable.
+        static const QStringList streamCiphers = {
+            "aes-128-ctr", "aes-192-ctr", "aes-256-ctr",
+            "aes-128-cfb", "aes-192-cfb", "aes-256-cfb",
+            "rc4-md5", "chacha20-ietf", "xchacha20",
+        };
+        if (streamCiphers.contains(method)) {
+            info.label = QObject::tr("Weak Cipher");
+            info.level = SecurityLevel::Weak;
+            return info;
+        }
+        info.label = QObject::tr("Encrypted");
+        info.level = SecurityLevel::Secure;
+        return info;
+    }
 }

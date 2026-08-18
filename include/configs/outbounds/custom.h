@@ -1,4 +1,5 @@
 #pragma once
+#include <QJsonArray>
 #include "include/configs/common/Outbound.h"
 
 namespace Configs
@@ -86,9 +87,50 @@ namespace Configs
             return type;
         };
 
+        // Analyzes the embedded config's egress outbound; blank when unknown.
+        SecurityInfo GetSecurity() override;
+
+        QJsonObject ExportIdentity() override;
+
+        bool IsEndpoint() override
+        {
+            // Only raw sing-box outbound JSON can describe an endpoint; Xray
+            // subtypes and full configs never do.
+            if (type != CustomOutbound) return false;
+            const auto t = QString2QJsonObject(config)["type"].toString();
+            return t == "wireguard" || t == "tailscale";
+        }
+
         bool IsXray() override { return type == CustomXrayOutbound; }
 
         bool IsXrayFullConfig() override { return type == CustomXrayFullConfig; }
+
+        // Every server address embedded in a custom Xray full config's outbounds
+        // (vnext / servers / address). sing-box needs the domain ones in its
+        // direct-DNS set so the proxy servers resolve directly instead of
+        // looping back through the proxy. Returns raw addresses; callers filter
+        // out literal IPs.
+        QStringList GetXrayFullConfigServerDomains() {
+            QStringList domains;
+            if (type != CustomXrayFullConfig) return domains;
+            const auto outbounds = QString2QJsonObject(config)["outbounds"].toArray();
+            for (const auto &v : outbounds) {
+                auto settings = v.toObject()["settings"].toObject();
+                auto collect = [&](const QString &key) {
+                    for (const auto &s : settings[key].toArray()) {
+                        auto addr = s.toObject()["address"].toString();
+                        if (!addr.isEmpty()) domains << addr;
+                    }
+                };
+                if (settings.contains("vnext")) collect("vnext");
+                if (settings.contains("servers")) collect("servers");
+                if (settings.contains("address")) {
+                    auto addr = settings["address"].toString();
+                    if (!addr.isEmpty()) domains << addr;
+                }
+            }
+            return domains;
+        }
 
         BuildResult Build() override
         {
@@ -115,6 +157,9 @@ namespace Configs
         BuildResult BuildXray() override
         {
             if (type == CustomXrayOutbound) {
+                // Outbound server-domain resolution is wired onto the Xray
+                // instance after creation (ThroneWiring), not baked into the
+                // config as a sockopt.domainStrategy.
                 return {QString2QJsonObject(config), ""};
             }
             return {};

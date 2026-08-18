@@ -13,6 +13,27 @@ namespace Configs
 {
     inline QStringList vPacketEncoding = {"", "packetaddr", "xudp"};
 
+    // Ordered worst-to-best; the ordering is relied on when sorting by security.
+    enum class SecurityLevel {
+        Unknown = 0,
+        None,
+        Weak,
+        Secure,
+    };
+
+    struct SecurityInfo {
+        QString label;
+        QString transport;
+        SecurityLevel level = SecurityLevel::Unknown;
+
+        bool isDangerous() const {
+            return level == SecurityLevel::None || level == SecurityLevel::Weak;
+        }
+    };
+
+    // Empty for the transports not worth showing (plain tcp / xray raw).
+    QString DisplayTransportName(const QString& type);
+
     class outbound : public baseConfig
     {
     public:
@@ -74,6 +95,18 @@ namespace Configs
             return QString("[%1] %2").arg(DisplayType(), DisplayName());
         }
 
+        // Overridden by protocols with their own crypto (WireGuard, SSH, ...);
+        // the default reads TLS/transport (or the Xray stream settings).
+        virtual SecurityInfo GetSecurity();
+
+        // GetSecurity() rendered for the type column, warning-prefixed when weak.
+        QString DisplaySecurity();
+
+    protected:
+        SecurityInfo SecurityFromTLS(const QString& transport);
+
+    public:
+
         virtual bool IsXray() { return false; }
 
         virtual bool IsExtraCore() { return false; }
@@ -107,13 +140,10 @@ namespace Configs
             if (stripMetadata) {
                 json.remove("tag");
             }
-            QUrl url;
-            url.setScheme("json");
-            url.setHost("throne");
-            url.setFragment(QJsonObject2QString(json, true)
+            const auto b64 = QJsonObject2QString(json, true)
                                 .toUtf8()
-                                .toBase64(QByteArray::Base64UrlEncoding));
-            return url.toString(QUrl::FullyEncoded);
+                                .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+            return QStringLiteral("throne://add/") + QString::fromLatin1(b64);
         }
 
         // baseConfig overrides
@@ -122,6 +152,7 @@ namespace Configs
         bool ParseFromClash(const clash::Proxies& object) override;
         QString ExportToLink() override;
         QJsonObject ExportToJson() override;
+        QJsonObject ExportIdentity() override;
         BuildResult Build() override;
     };
 }

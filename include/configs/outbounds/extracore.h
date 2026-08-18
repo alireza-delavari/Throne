@@ -39,6 +39,9 @@ namespace Configs
 
         QString DisplayType() override { return "ExtraCore"; };
 
+        // The config is owned by an external core, so we cannot inspect it.
+        SecurityInfo GetSecurity() override { return {}; }
+
         bool IsExtraCore() override { return true; }
 
         BuildResult Build() override

@@ -65,9 +65,24 @@ void EditChain::on_select_profile_clicked() {
     });
 }
 
+// Whether a profile may be a hop, warning when the reason is worth explaining.
+// A chain is a fixed route, while an auto selector moves to another member
+// whenever the current one degrades — nesting one would give the chain a hop
+// that changes underneath it, so it is refused here instead of failing later at
+// build time with a message that points at the wrong thing.
+static bool acceptChainHop(const std::shared_ptr<Configs::Profile> &ent) {
+    if (ent == nullptr || ent->type == "chain") return false;
+    if (ent->type == "autoselector") {
+        MessageBoxWarning(software_name, QObject::tr("An auto selector cannot be a hop in a chain: it moves to a different "
+                                                     "server on its own whenever one degrades."));
+        return false;
+    }
+    return true;
+}
+
 void EditChain::AddProfileToListIfExist(int profileId) {
     auto _ent = Configs::dataManager->profilesRepo->GetProfile(profileId);
-    if (_ent != nullptr && _ent->type != "chain") {
+    if (acceptChainHop(_ent)) {
         auto wI = new QListWidgetItem();
         wI->setData(114514, profileId);
         auto w = new ProxyItem(this, _ent, wI);
@@ -86,7 +101,7 @@ void EditChain::AddProfileToListIfExist(int profileId) {
 
 void EditChain::ReplaceProfile(ProxyItem *w, int profileId) {
     auto _ent = Configs::dataManager->profilesRepo->GetProfile(profileId);
-    if (_ent != nullptr && _ent->type != "chain") {
+    if (acceptChainHop(_ent)) {
         w->item->setData(114514, profileId);
         w->ent = _ent;
         w->refresh_data();

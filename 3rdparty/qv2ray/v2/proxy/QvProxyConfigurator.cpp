@@ -50,6 +50,19 @@ namespace Qv2ray::components::proxy {
         LOG("Found " + QSTRN(result.size()) + " network services: " + result.join(";"));
         return result;
     }
+
+    // networksetup's plist backup copy needs root and prints to stderr, which QProcess::execute
+    // would forward straight into the app log on every toggle.
+    void macOSnetworkSetup(const QStringList &args) {
+        QProcess p;
+        p.setProgram("/usr/sbin/networksetup");
+        p.setArguments(args);
+        p.setStandardOutputFile(QProcess::nullDevice());
+        p.setStandardErrorFile(QProcess::nullDevice());
+        p.start();
+        p.waitForStarted();
+        p.waitForFinished();
+    }
 #endif
 #ifdef Q_OS_WIN
 #define NO_CONST(expr) const_cast<wchar_t *>(expr)
@@ -363,15 +376,15 @@ namespace Qv2ray::components::proxy {
         for (const auto &service: macOSgetNetworkServices()) {
             LOG("Setting proxy for interface: " + service);
             if (hasHTTP) {
-                QProcess::execute("/usr/sbin/networksetup", {"-setwebproxystate", service, "on"});
-                QProcess::execute("/usr/sbin/networksetup", {"-setsecurewebproxystate", service, "on"});
-                QProcess::execute("/usr/sbin/networksetup", {"-setwebproxy", service, address, QSTRN(httpPort)});
-                QProcess::execute("/usr/sbin/networksetup", {"-setsecurewebproxy", service, address, QSTRN(httpPort)});
+                macOSnetworkSetup({"-setwebproxystate", service, "on"});
+                macOSnetworkSetup({"-setsecurewebproxystate", service, "on"});
+                macOSnetworkSetup({"-setwebproxy", service, address, QSTRN(httpPort)});
+                macOSnetworkSetup({"-setsecurewebproxy", service, address, QSTRN(httpPort)});
             }
 
             if (hasSOCKS) {
-                QProcess::execute("/usr/sbin/networksetup", {"-setsocksfirewallproxystate", service, "on"});
-                QProcess::execute("/usr/sbin/networksetup", {"-setsocksfirewallproxy", service, address, QSTRN(socksPort)});
+                macOSnetworkSetup({"-setsocksfirewallproxystate", service, "on"});
+                macOSnetworkSetup({"-setsocksfirewallproxy", service, address, QSTRN(socksPort)});
             }
         }
 
@@ -426,10 +439,10 @@ namespace Qv2ray::components::proxy {
 #else
         for (const auto &service: macOSgetNetworkServices()) {
             LOG("Clearing proxy for interface: " + service);
-            QProcess::execute("/usr/sbin/networksetup", {"-setautoproxystate", service, "off"});
-            QProcess::execute("/usr/sbin/networksetup", {"-setwebproxystate", service, "off"});
-            QProcess::execute("/usr/sbin/networksetup", {"-setsecurewebproxystate", service, "off"});
-            QProcess::execute("/usr/sbin/networksetup", {"-setsocksfirewallproxystate", service, "off"});
+            macOSnetworkSetup({"-setautoproxystate", service, "off"});
+            macOSnetworkSetup({"-setwebproxystate", service, "off"});
+            macOSnetworkSetup({"-setsecurewebproxystate", service, "off"});
+            macOSnetworkSetup({"-setsocksfirewallproxystate", service, "off"});
         }
 
 #endif

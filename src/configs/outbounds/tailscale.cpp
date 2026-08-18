@@ -131,6 +131,11 @@ namespace Configs {
         return "Tailscale";
     }
 
+    SecurityInfo tailscale::GetSecurity()
+    {
+        return {QObject::tr("Encrypted"), "WireGuard", SecurityLevel::Secure};
+    }
+
     bool tailscale::IsEndpoint()
     {
         return true;

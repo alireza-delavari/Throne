@@ -91,6 +91,6 @@ bool AutoRun_IsEnabled() {
     return returnValue;
 }
 
-void AutoRun_FixPrivilegeIfNeeded() {}
+void AutoRun_FixTaskIfNeeded() {}
 
 void AutoRun_MigrateIfNeeded() {}

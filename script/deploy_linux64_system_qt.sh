@@ -11,10 +11,7 @@ cp $GITHUB_WORKSPACE/build/Throne $DEST
 cp $GITHUB_WORKSPACE/res/public/Throne.png $DEST
 
 #### copy Core ####
-cd download-artifact
-cd *${DEST_SUFFIX%-system-qt}
-tar xvzf artifacts.tgz -C ../../
-cd ../..
+source "$(dirname "$0")/extract_core_artifact.sh"
 cp deployment/${DEST_SUFFIX%-system-qt}/ThroneCore $DEST
 rm -rf deployment/${DEST_SUFFIX%-system-qt}
 

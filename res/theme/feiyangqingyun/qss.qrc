@@ -72,5 +72,29 @@
         <file>qss/lightblue/radiobutton_checked.png</file>
         <file>qss/lightblue/radiobutton_unchecked_disable.png</file>
         <file>qss/lightblue/radiobutton_unchecked.png</file>
+        <file>qss/softpink.css</file>
+        <file>qss/softpink/add_bottom.png</file>
+        <file>qss/softpink/add_left.png</file>
+        <file>qss/softpink/add_right.png</file>
+        <file>qss/softpink/add_top.png</file>
+        <file>qss/softpink/arrow_bottom.png</file>
+        <file>qss/softpink/arrow_left.png</file>
+        <file>qss/softpink/arrow_right.png</file>
+        <file>qss/softpink/arrow_top.png</file>
+        <file>qss/softpink/branch_close.png</file>
+        <file>qss/softpink/branch_open.png</file>
+        <file>qss/softpink/calendar_nextmonth.png</file>
+        <file>qss/softpink/calendar_prevmonth.png</file>
+        <file>qss/softpink/checkbox_checked.png</file>
+        <file>qss/softpink/checkbox_checked_disable.png</file>
+        <file>qss/softpink/checkbox_parcial.png</file>
+        <file>qss/softpink/checkbox_parcial_disable.png</file>
+        <file>qss/softpink/checkbox_unchecked.png</file>
+        <file>qss/softpink/checkbox_unchecked_disable.png</file>
+        <file>qss/softpink/menu_checked.png</file>
+        <file>qss/softpink/radiobutton_checked.png</file>
+        <file>qss/softpink/radiobutton_checked_disable.png</file>
+        <file>qss/softpink/radiobutton_unchecked.png</file>
+        <file>qss/softpink/radiobutton_unchecked_disable.png</file>
     </qresource>
 </RCC>

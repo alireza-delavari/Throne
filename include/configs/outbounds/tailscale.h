@@ -29,6 +29,7 @@ namespace Configs
         QString GetAddress() override;
         QString DisplayAddress() override;
         QString DisplayType() override;
+        SecurityInfo GetSecurity() override;
         bool IsEndpoint() override;
     };
 }

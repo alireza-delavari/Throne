@@ -111,7 +111,7 @@ position:relative;
 left:10px;
 }
 
-.QPushButton,.QToolButton{
+.QPushButton,.QToolButton,StartStopButton{
 border-style:none;
 border:1px solid #B6B6B6;
 color:#57595B;
@@ -121,11 +121,11 @@ border-radius:5px;
 background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #E4E4E4,stop:1 #E4E4E4);
 }
 
-.QPushButton:hover,.QToolButton:hover{
+.QPushButton:hover,.QToolButton:hover,StartStopButton:hover{
 background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #F6F6F6,stop:1 #F6F6F6);
 }
 
-.QPushButton:pressed,.QToolButton:pressed{
+.QPushButton:pressed,.QToolButton:pressed,StartStopButton:pressed{
 background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #E4E4E4,stop:1 #E4E4E4);
 }
 

@@ -64,6 +64,11 @@ namespace Configs_network {
             return config;
         }
 
+        auto reservedByteArray = DecodeB64IfValid(jsonResp["client_id"].toString());
+        for (char byte : reservedByteArray) {
+            config->reserved << static_cast<unsigned char>(byte);
+        }
+
         auto peerObj = jsonResp["peers"].toArray()[0].toObject();
         if (peerObj.isEmpty()) {
             *error = "Received invalid response: " + rawResponse;

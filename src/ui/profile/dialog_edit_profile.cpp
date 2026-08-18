@@ -3,9 +3,11 @@
 #include "include/ui/profile/edit_http.h"
 #include "include/ui/profile/edit_shadowsocks.h"
 #include "include/ui/profile/edit_chain.h"
+#include "include/ui/profile/edit_autoselector.h"
 #include "include/ui/profile/edit_vmess.h"
 #include "include/ui/profile/edit_vless.h"
 #include "include/ui/profile/edit_anytls.h"
+#include "include/ui/profile/edit_mieru.h"
 #include "include/ui/profile/edit_wireguard.h"
 #include "include/ui/profile/edit_tailscale.h"
 #include "include/ui/profile/edit_ssh.h"
@@ -18,6 +20,7 @@
 
 #include <QInputDialog>
 #include <QLabel>
+#include <QSet>
 
 #include "include/configs/common/TLS.h"
 #include "include/configs/common/utils.h"
@@ -42,6 +45,50 @@
 
 namespace {
 constexpr int kXrayXHTTPNetworkMinWidth = 760;
+
+QWidget *effectiveFocusWidget(QWidget *widget) {
+    QSet<QWidget *> visited;
+    while (widget && widget->focusProxy() && !visited.contains(widget)) {
+        visited.insert(widget);
+        widget = widget->focusProxy();
+    }
+    return widget;
+}
+
+QList<QWidget *> collectTabOrder(QWidget *window, const QWidget *subtree = nullptr,
+                                 const QWidget *marker = nullptr) {
+    if (!window) return {};
+
+    QList<QWidget *> tabOrder;
+    QSet<QWidget *> visited;
+    auto *current = window;
+    while (true) {
+        auto *next = current->nextInFocusChain();
+        if (!next || next == window || visited.contains(next)) break;
+        visited.insert(next);
+        current = next;
+
+        if (subtree && current != subtree && !subtree->isAncestorOf(current)) continue;
+
+        const bool isMarker = current == marker;
+        if (!isMarker && !(current->focusPolicy() & Qt::TabFocus)) continue;
+
+        auto *focusWidget = isMarker ? current : effectiveFocusWidget(current);
+        if (!focusWidget || tabOrder.contains(focusWidget)) continue;
+        if (subtree && focusWidget != subtree && !subtree->isAncestorOf(focusWidget)) continue;
+        tabOrder.append(focusWidget);
+    }
+
+    return tabOrder;
+}
+
+void rebuildTabOrder(const QList<QWidget *> &tabOrder) {
+    if (tabOrder.size() < 2) return;
+
+    for (qsizetype i = 1; i < tabOrder.size(); ++i) {
+        QWidget::setTabOrder(tabOrder.at(i - 1), tabOrder.at(i));
+    }
+}
 }
 
 void DialogEditProfile::queueRefreshDialogLayout() {
@@ -66,6 +113,12 @@ DialogEditProfile::DialogEditProfile(const QString &_type, int profileOrGroupId,
     : QDialog(parent), ui(new Ui::DialogEditProfile) {
     // setup UI
     ui->setupUi(this);
+
+    // Save current tab order and the insertion point for innerWidget
+    outerTabOrder = collectTabOrder(this, nullptr, ui->fake);
+    innerTabOrderIndex = outerTabOrder.indexOf(ui->fake);
+    if (innerTabOrderIndex >= 0) outerTabOrder.removeAt(innerTabOrderIndex);
+
     auto setXrayXHTTPNetworkVisible = [=,this](bool visible) {
         ui->xray_network_scroll->setMinimumWidth(visible ? kXrayXHTTPNetworkMinWidth : 0);
         ui->xray_xhttp_box->setVisible(visible);
@@ -169,10 +222,11 @@ DialogEditProfile::DialogEditProfile(const QString &_type, int profileOrGroupId,
     });
     emit ui->security->currentTextChanged(ui->security->currentText());
 
-    // for fragment
-    connect(ui->tls_frag, &QCheckBox::stateChanged, this, [=,this](bool state)
+    // for fragment: fallback delay only applies to the built-in implementation,
+    // so disable it when the tri-state is Off (index 2).
+    connect(ui->fragment, &QComboBox::currentIndexChanged, this, [=,this](int index)
     {
-        ui->tls_frag_fall_delay->setEnabled(state);
+        ui->tls_frag_fall_delay->setEnabled(index != 2);
     });
 
     // mux setting changed
@@ -264,6 +318,7 @@ DialogEditProfile::DialogEditProfile(const QString &_type, int profileOrGroupId,
         this->type = _type;
 
         // load type to combo box
+        LOAD_TYPE("autoselector")
         LOAD_TYPE("socks")
         LOAD_TYPE("http")
         LOAD_TYPE("shadowsocks")
@@ -277,6 +332,7 @@ DialogEditProfile::DialogEditProfile(const QString &_type, int profileOrGroupId,
         LOAD_TYPE("naive")
         LOAD_TYPE("trusttunnel")
         LOAD_TYPE("anytls")
+        LOAD_TYPE("mieru")
         LOAD_TYPE("shadowtls")
         LOAD_TYPE("wireguard")
         LOAD_TYPE("tailscale")
@@ -329,6 +385,10 @@ void DialogEditProfile::typeSelected(const QString &newType) {
         auto _innerWidget = new EditChain(this);
         innerWidget = _innerWidget;
         innerEditor = _innerWidget;
+    } else if (type == "autoselector") {
+        auto _innerWidget = new EditAutoSelector(this);
+        innerWidget = _innerWidget;
+        innerEditor = _innerWidget;
     } else if (type == "vmess") {
         auto _innerWidget = new EditVMess(this);
         innerWidget = _innerWidget;
@@ -378,6 +438,10 @@ void DialogEditProfile::typeSelected(const QString &newType) {
         innerEditor = _innerWidget;
     } else if (type == "anytls") {
         auto _innerWidget = new EditAnyTLS(this);
+        innerWidget = _innerWidget;
+        innerEditor = _innerWidget;
+    } else if (type == "mieru") {
+        auto _innerWidget = new EditMieru(this);
         innerWidget = _innerWidget;
         innerEditor = _innerWidget;
     } else if (type == "shadowtls") {
@@ -434,6 +498,7 @@ void DialogEditProfile::typeSelected(const QString &newType) {
 
     // hide some widget
     auto showAddressPort = type != "chain"
+                           && type != "autoselector"
                            && type != "direct"
                            && customType != Configs::Custom::CustomOutbound
                            && customType != Configs::Custom::CustomFullConfig
@@ -446,6 +511,7 @@ void DialogEditProfile::typeSelected(const QString &newType) {
     ui->port_l->setVisible(showAddressPort);
 
     auto showAdvancedDialOption = type != "chain"
+    && type != "autoselector"
     && type != "extracore" && type != "tailscale"
     && customType != Configs::Custom::CustomOutbound
     && customType != Configs::Custom::CustomFullConfig
@@ -475,10 +541,11 @@ void DialogEditProfile::typeSelected(const QString &newType) {
         } else {
             ui->utlsFingerprint->setCurrentText(tls->utls->fingerPrint);
         }
-        ui->tls_frag->setChecked(tls->fragment);
-        ui->tls_frag_fall_delay->setEnabled(tls->fragment);
+        ui->fragment->setCurrentIndex(tls->getFragmentState());
+        ui->tls_frag_fall_delay->setEnabled(tls->getFragmentState() != 2);
         ui->tls_frag_fall_delay->setText(tls->fragment_fallback_delay);
         ui->tls_rec_frag->setChecked(tls->record_fragment);
+        ui->tls_tricks->setCurrentIndex(tls->getTlsTricksState());
         ui->insecure->setChecked(tls->insecure);
         ui->headers->setText(Configs::getHeadersString(transport->headers));
         ui->service_name->setText(transport->service_name);
@@ -504,8 +571,10 @@ void DialogEditProfile::typeSelected(const QString &newType) {
         ui->xray_xpadding_placement->setCurrentText(xrayStream->xhttp->xPaddingPlacement);
         ui->xray_xpadding_method->setCurrentText(xrayStream->xhttp->xPaddingMethod);
         ui->xray_uplink_http_method->setCurrentText(xrayStream->xhttp->uplinkHTTPMethod);
-        ui->xray_session_placement->setCurrentText(xrayStream->xhttp->sessionPlacement);
-        ui->xray_session_key->setText(xrayStream->xhttp->sessionKey);
+        ui->xray_session_placement->setCurrentText(xrayStream->xhttp->sessionIDPlacement);
+        ui->xray_session_key->setText(xrayStream->xhttp->sessionIDKey);
+        ui->xray_session_id_table->setText(xrayStream->xhttp->sessionIDTable);
+        ui->xray_session_id_length->setText(xrayStream->xhttp->sessionIDLength);
         ui->xray_seq_placement->setCurrentText(xrayStream->xhttp->seqPlacement);
         ui->xray_seq_key->setText(xrayStream->xhttp->seqKey);
         ui->xray_uplink_data_placement->setCurrentText(xrayStream->xhttp->uplinkDataPlacement);
@@ -515,9 +584,9 @@ void DialogEditProfile::typeSelected(const QString &newType) {
         ui->xray_no_sse->setChecked(xrayStream->xhttp->noSSEHeader);
         ui->xray_scMaxEachPostBytes->setText(xrayStream->xhttp->scMaxEachPostBytes);
         ui->xray_scMinPostsIntervalMs->setText(xrayStream->xhttp->scMinPostsIntervalMs);
-        ui->xray_scMaxBufferedPosts->setText(xrayStream->xhttp->scMaxBufferedPosts);
+        ui->xray_scMaxBufferedPosts->setText(Int2String(xrayStream->xhttp->scMaxBufferedPosts));
         ui->xray_scStreamUpServerSecs->setText(xrayStream->xhttp->scStreamUpServerSecs);
-        ui->xray_serverMaxHeaderBytes->setText(xrayStream->xhttp->serverMaxHeaderBytes);
+        ui->xray_serverMaxHeaderBytes->setText(Int2String(xrayStream->xhttp->serverMaxHeaderBytes));
         ui->xray_max_concurrency->setText(xrayStream->xhttp->maxConcurrency);
         ui->xray_max_connections->setText(xrayStream->xhttp->maxConnections);
         ui->xray_hMaxRequestTimes->setText(xrayStream->xhttp->hMaxRequestTimes);
@@ -563,11 +632,22 @@ void DialogEditProfile::typeSelected(const QString &newType) {
     ui->bean->setTitle(ent->outbound->DisplayType());
     delete old;
 
+    // Update tab order to include innerWidget
+    const auto innerTabOrder = collectTabOrder(this, innerWidget);
+    if (!innerTabOrder.isEmpty() && innerTabOrderIndex >= 0 && innerTabOrderIndex <= outerTabOrder.size()) {
+        auto completeTabOrder = outerTabOrder.mid(0, innerTabOrderIndex);
+        completeTabOrder.append(innerTabOrder);
+        completeTabOrder.append(outerTabOrder.mid(innerTabOrderIndex));
+        rebuildTabOrder(completeTabOrder);
+    }
+
     // 左边 bean inner editor
     innerEditor->get_edit_dialog = [&]() { return static_cast<QWidget*>(this); };
     innerEditor->get_edit_text_name = [&]() { return ui->name->text(); };
     innerEditor->get_edit_text_serverAddress = [&]() { return ui->address->text(); };
     innerEditor->get_edit_text_serverPort = [&]() { return ui->port->text(); };
+    innerEditor->set_edit_text_serverAddress = [&](const QString &v) { ui->address->setText(v); };
+    innerEditor->set_edit_text_serverPort = [&](const QString &v) { ui->port->setText(v); };
     innerEditor->editor_cache_updated = [=,this] { editor_cache_updated_impl(); };
     innerEditor->onStart(ent);
 
@@ -681,12 +761,13 @@ bool DialogEditProfile::onEnd() {
         transport->path = ui->path->text();
         transport->host = ui->host->text();
         tls->server_name = ui->sni->text();
-        tls->alpn = SplitAndTrim(ui->alpn->text(), ",");
+        tls->alpn = SplitAndTrim(ui->alpn->text(), ",", false);
         tls->utls->fingerPrint = ui->utlsFingerprint->currentText();
         tls->utls->enabled = !tls->utls->fingerPrint.isEmpty();
-        tls->fragment = ui->tls_frag->isChecked();
+        tls->saveFragmentState(ui->fragment->currentIndex());
         tls->fragment_fallback_delay = ui->tls_frag_fall_delay->text();
         tls->record_fragment = ui->tls_rec_frag->isChecked();
+        tls->saveTlsTricksState(ui->tls_tricks->currentIndex());
         tls->insecure = ui->insecure->isChecked();
         transport->headers = Configs::parseHeaderPairs(ui->headers->text());
         transport->method = ui->method->text();
@@ -740,8 +821,10 @@ bool DialogEditProfile::onEnd() {
             xrayStream->xhttp->xPaddingPlacement = ui->xray_xpadding_placement->currentText();
             xrayStream->xhttp->xPaddingMethod = ui->xray_xpadding_method->currentText();
             xrayStream->xhttp->uplinkHTTPMethod = ui->xray_uplink_http_method->currentText();
-            xrayStream->xhttp->sessionPlacement = ui->xray_session_placement->currentText();
-            xrayStream->xhttp->sessionKey = ui->xray_session_key->text();
+            xrayStream->xhttp->sessionIDPlacement = ui->xray_session_placement->currentText();
+            xrayStream->xhttp->sessionIDKey = ui->xray_session_key->text();
+            xrayStream->xhttp->sessionIDTable = ui->xray_session_id_table->text();
+            xrayStream->xhttp->sessionIDLength = ui->xray_session_id_length->text();
             xrayStream->xhttp->seqPlacement = ui->xray_seq_placement->currentText();
             xrayStream->xhttp->seqKey = ui->xray_seq_key->text();
             xrayStream->xhttp->uplinkDataPlacement = ui->xray_uplink_data_placement->currentText();
@@ -751,9 +834,9 @@ bool DialogEditProfile::onEnd() {
             xrayStream->xhttp->noSSEHeader = ui->xray_no_sse->isChecked();
             xrayStream->xhttp->scMaxEachPostBytes = ui->xray_scMaxEachPostBytes->text();
             xrayStream->xhttp->scMinPostsIntervalMs = ui->xray_scMinPostsIntervalMs->text();
-            xrayStream->xhttp->scMaxBufferedPosts = ui->xray_scMaxBufferedPosts->text();
+            xrayStream->xhttp->scMaxBufferedPosts = ui->xray_scMaxBufferedPosts->text().toLongLong();
             xrayStream->xhttp->scStreamUpServerSecs = ui->xray_scStreamUpServerSecs->text();
-            xrayStream->xhttp->serverMaxHeaderBytes = ui->xray_serverMaxHeaderBytes->text();
+            xrayStream->xhttp->serverMaxHeaderBytes = ui->xray_serverMaxHeaderBytes->text().toInt();
             xrayStream->xhttp->maxConcurrency = ui->xray_max_concurrency->text();
             xrayStream->xhttp->maxConnections = ui->xray_max_connections->text();
             xrayStream->xhttp->hMaxRequestTimes = ui->xray_hMaxRequestTimes->text();

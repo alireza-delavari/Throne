@@ -34,6 +34,9 @@ namespace Configs {
         
         // Save route profile to database (internal helper)
         void saveToDatabase(const RouteProfile* routeProfile, int id) const;
+
+        // Throws, so the caller's transaction aborts.
+        void saveToDatabaseInTx(const RouteProfile* routeProfile, int id) const;
         
         // Load route profile from database (including rules)
         std::shared_ptr<RouteProfile> loadFromDatabase(int id) const;
@@ -51,6 +54,8 @@ namespace Configs {
         void createTables() const;
 
         [[nodiscard]] bool routeRulesColumnExists(const char* columnName) const;
+
+        [[nodiscard]] bool routeProfilesColumnExists(const char* columnName) const;
 
         // Get next available route profile ID
         int NewRouteProfileID() const;

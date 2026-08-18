@@ -17,6 +17,7 @@ namespace Configs {
         std::string name;
         int gid;
         int latency;
+        long long latency_at = 0;
         std::string dl_speed;
         std::string ul_speed;
         std::string test_country;
@@ -29,15 +30,17 @@ namespace Configs {
     // profiles -> groups, groups_order, profiles tables
     // routes   -> route_profiles, route_rules tables
     // settings -> settings table
+    // otp      -> otp_profiles table
     // icons    -> icons/ folder (handled by the UI layer, not the database)
     struct BackupParts {
         bool profiles = false;
         bool routes = false;
         bool settings = false;
+        bool otp = false;
         bool icons = false;
 
-        [[nodiscard]] bool anyDb() const { return profiles || routes || settings; }
-        [[nodiscard]] bool any() const { return profiles || routes || settings || icons; }
+        [[nodiscard]] bool anyDb() const { return profiles || routes || settings || otp; }
+        [[nodiscard]] bool any() const { return anyDb() || icons; }
     };
 
     // Max bound parameters per statement (SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999).
@@ -45,6 +48,18 @@ namespace Configs {
     constexpr int BATCH_LIMIT_READ = 4096;
     // Run WAL checkpoint after this many write operations (exec or batch chunk).
     constexpr int WAL_CHECKPOINT_AFTER_WRITES = 10000;
+
+    // How long a statement waits for a competing writer's lock before SQLITE_BUSY
+    // is raised. SQLiteCpp defaults to 0, i.e. transient contention fails instantly
+    // and surfaces as an exception.
+    constexpr int BUSY_TIMEOUT_MS = 5000;
+
+    // Both thresholds must be met; SQLite never returns freed pages to the OS on its own.
+    constexpr long long VACUUM_MIN_FREE_BYTES = 4LL * 1024 * 1024; // 4 MiB
+    constexpr double VACUUM_MIN_FREE_RATIO = 0.50;                 // 50%
+
+    constexpr int INCREMENTAL_VACUUM_PAGES = 1024;
+    constexpr unsigned long MAINTENANCE_DELAY_MS = 30000;
 
     inline void NotifyError(const std::string& query, std::exception& e) {
         runOnUiThread([=] {
@@ -59,6 +74,7 @@ namespace Configs {
         SQLite::Database db;
         std::atomic<int> writeCount{0};
         void maybeCheckpoint(int count);
+        void maybeVacuum();
 
         void execDeleteByIdInChunk(const std::string& table, const std::string& idColumn, const std::vector<int>& ids);
         void execBatchSettingsReplaceChunk(const std::vector<std::pair<std::string, std::string>>& keyValues);
@@ -67,14 +83,18 @@ namespace Configs {
         void execBatchInsertProfilesChunk(const std::vector<ProfileInsertRow>& rows);
         void execBatchReplaceProfilesChunk(const std::vector<ProfileInsertRow>& rows);
     public:
-        Database(const std::string& path)
-            : db(path, SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE) {
+        explicit Database(const std::string& path, bool incrementalVacuum = false)
+            : db(path, SQLite::OPEN_READWRITE | SQLite::OPEN_CREATE, BUSY_TIMEOUT_MS) {
+            // Must precede journal_mode: WAL writes the header, after which auto_vacuum no longer takes.
+            if (incrementalVacuum) db.exec("PRAGMA auto_vacuum = INCREMENTAL");
             db.exec("PRAGMA foreign_keys = ON");
             db.exec("PRAGMA journal_mode = WAL");
             db.exec("PRAGMA synchronous = NORMAL");
             db.exec("PRAGMA mmap_size = 67108864"); // 64MB
-            checkpointWal();
         }
+
+        // Not safe from the constructor: a VACUUM there stalls startup.
+        void RunMaintenance();
 
     private:
 
@@ -163,9 +183,9 @@ namespace Configs {
             }
         }
 
-        // Chunked (12 params per row -> BATCH_LIMIT/12 rows per chunk)
+        // Chunked (13 params per row -> BATCH_LIMIT/13 rows per chunk)
         void execBatchInsertProfiles0(const std::vector<ProfileInsertRow>& rows) {
-            const size_t chunkSize = BATCH_LIMIT_WRITE / 12;
+            const size_t chunkSize = BATCH_LIMIT_WRITE / 13;
             for (size_t off = 0; off < rows.size(); off += chunkSize) {
                 size_t end = std::min(off + chunkSize, rows.size());
                 std::vector<ProfileInsertRow> chunk(rows.begin() + static_cast<std::ptrdiff_t>(off),
@@ -176,7 +196,7 @@ namespace Configs {
 
         // Same chunking as execBatchInsertProfiles; INSERT OR REPLACE for batch save/update
         void execBatchReplaceProfiles0(const std::vector<ProfileInsertRow>& rows) {
-            const size_t chunkSize = BATCH_LIMIT_WRITE / 12;
+            const size_t chunkSize = BATCH_LIMIT_WRITE / 13;
             for (size_t off = 0; off < rows.size(); off += chunkSize) {
                 size_t end = std::min(off + chunkSize, rows.size());
                 std::vector<ProfileInsertRow> chunk(rows.begin() + static_cast<std::ptrdiff_t>(off),
@@ -193,6 +213,14 @@ namespace Configs {
             } catch (std::exception& e) {
                 NotifyError(sql, e);
             }
+        }
+
+        // Throwing variant of exec(): lets callers compose an explicit
+        // transaction (BEGIN/COMMIT/ROLLBACK) in which a failed statement must
+        // abort the whole unit instead of being swallowed per-statement.
+        template<typename... Args>
+        void execThrow(const std::string& sql, Args&&... args) {
+            exec0(sql, std::forward<Args>(args)...);
         }
 
         template<typename... Args>

@@ -5,10 +5,7 @@ rm -rf $DEST
 mkdir -p $DEST
 
 #### copy golang => .app ####
-cd download-artifact
-cd *$DEST_SUFFIX
-tar xvzf artifacts.tgz -C ../../
-cd ../..
+source "$(dirname "$0")/extract_core_artifact.sh"
 
 mv deployment/$DEST_SUFFIX/* $GITHUB_WORKSPACE/build/Throne.app/Contents/MacOS
 

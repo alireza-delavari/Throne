@@ -13,6 +13,9 @@ namespace Configs
 
         QString DisplayAddress() override { return ""; };
 
+        // No security of its own; it inherits whatever its hops use.
+        SecurityInfo GetSecurity() override { return {}; }
+
         bool ParseFromJson(const QJsonObject &object) override {
             if (object.isEmpty()) return false;
             if (object.contains("name")) name = object["name"].toString();

@@ -283,6 +283,15 @@ namespace Configs {
         return object;
     }
 
+    QJsonObject hysteria::ExportIdentity()
+    {
+        auto object = outbound::ExportIdentity();
+        object["protocol_version"] = protocol_version;
+        if (!server_ports.isEmpty()) object["server_ports"] = server_ports.join(",");
+        if (!obfs.isEmpty()) object["obfs"] = true;
+        return object;
+    }
+
     BuildResult hysteria::Build()
     {
         QJsonObject object;
@@ -317,5 +326,10 @@ namespace Configs {
     QString hysteria::DisplayType()
     {
         return "Hysteria";
+    }
+
+    SecurityInfo hysteria::GetSecurity()
+    {
+        return SecurityFromTLS("QUIC");
     }
 }

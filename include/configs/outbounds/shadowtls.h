@@ -28,6 +28,7 @@ namespace Configs
         bool ParseFromJson(const QJsonObject& object) override;
         QString ExportToLink() override;
         QJsonObject ExportToJson() override;
+        QJsonObject ExportIdentity() override;
         BuildResult Build() override;
 
         QString DisplayType() override;

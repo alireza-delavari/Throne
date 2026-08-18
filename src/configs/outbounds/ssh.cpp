@@ -15,15 +15,15 @@ namespace Configs {
 
         outbound::ParseFromLink(link);
 
-        if (query.hasQueryItem("user")) user = query.queryItemValue("user");
-        if (query.hasQueryItem("password")) password = query.queryItemValue("password");
+        if (query.hasQueryItem("user")) user = query.queryItemValue("user", QUrl::FullyDecoded);
+        if (query.hasQueryItem("password")) password = query.queryItemValue("password", QUrl::FullyDecoded);
         
         QString privateKeyB64 = query.queryItemValue("private_key");
         if (!privateKeyB64.isEmpty()) {
             private_key = QByteArray::fromBase64(privateKeyB64.toUtf8(), QByteArray::OmitTrailingEquals);
         }
-        if (query.hasQueryItem("private_key_path")) private_key_path = query.queryItemValue("private_key_path");
-        if (query.hasQueryItem("private_key_passphrase")) private_key_passphrase = query.queryItemValue("private_key_passphrase");
+        if (query.hasQueryItem("private_key_path")) private_key_path = query.queryItemValue("private_key_path", QUrl::FullyDecoded);
+        if (query.hasQueryItem("private_key_passphrase")) private_key_passphrase = query.queryItemValue("private_key_passphrase", QUrl::FullyDecoded);
         
         QString hostKeysRaw = query.queryItemValue("host_key");
         if (!hostKeysRaw.isEmpty()) {
@@ -41,7 +41,7 @@ namespace Configs {
             }
         }
         
-        if (query.hasQueryItem("client_version")) client_version = query.queryItemValue("client_version");
+        if (query.hasQueryItem("client_version")) client_version = query.queryItemValue("client_version", QUrl::FullyDecoded);
 
         return !server.isEmpty();
     }
@@ -159,5 +159,10 @@ namespace Configs {
     QString ssh::DisplayType()
     {
         return "SSH";
+    }
+
+    SecurityInfo ssh::GetSecurity()
+    {
+        return {QObject::tr("Encrypted"), {}, SecurityLevel::Secure};
     }
 }

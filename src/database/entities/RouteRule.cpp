@@ -148,6 +148,17 @@ namespace Configs {
         return obj;
     }
 
+    QJsonObject RouteRule::to_share_json() {
+        // Faithful, portable representation of a single rule for sharing: the sing-box
+        // fields with outbound as a portable string (no adblock injection), plus our own
+        // name + type token so simple/advanced rules round-trip.
+        QJsonObject obj = get_rule_json(true);
+        if (obj.isEmpty()) return obj; // outbound profile missing; caller skips it
+        obj["name"] = name;
+        obj["type"] = ruleTypeToToken(type);
+        return obj;
+    }
+
     // TODO use constant for field names
     QStringList RouteRule::tab_attributes() {
         QStringList out;
@@ -503,7 +514,7 @@ namespace Configs {
 
     bool RouteRule::isEmpty() {
         if (type != custom) {
-            if (type == simpleAddressProxy || type == simpleAddressBypass || type == simpleAddressBlock) {
+            if (type == simpleAddressProxy || type == simpleAddressBypass || type == simpleAddressBlock || type == simpleAddressWarpBypass) {
                 return domain.empty() &&
                     domain_suffix.empty() &&
                     domain_keyword.empty() &&
@@ -522,7 +533,7 @@ namespace Configs {
 
     bool RouteRule::canEditAttr(const QString &attr) {
         if (type == custom) return true;
-        if (type == simpleAddressProxy || type == simpleAddressBypass || type == simpleAddressBlock) {
+        if (type == simpleAddressProxy || type == simpleAddressBypass || type == simpleAddressBlock || type == simpleAddressWarpBypass) {
             return attr == "domain" || attr == "domain_suffix" || attr == "domain_keyword" || attr == "domain_regex" || attr == "rule_set" || attr == "ip_cidr";
         } else {
             return attr == "process_path" || attr == "process_name";

@@ -19,7 +19,7 @@
      <property name="styleSheet">
       <string notr="true">QTabWidget::pane {
     margin-top: 1px;
-    border: 1px solid #555555;
+    border: 1px solid #777777;
     border-radius: 4px;
 }
 
@@ -29,7 +29,7 @@ QTabBar {
 }
 
 QTabBar::tab {
-    border: 1px solid #555555;
+    border: 1px solid #777777;
     border-radius: 4px;
 
     padding: 2px 4px;
@@ -41,11 +41,11 @@ QTabBar::tab:selected {
 }
 
 QTabBar::tab:!selected {
-    border: 1px solid #555555;
+    border: 1px solid #777777;
 }
 
 QTabBar::tab:hover:!selected {
-    border: 1px solid #555555;
+    border: 1px solid #777777;
 }</string>
      </property>
      <property name="currentIndex">
@@ -59,10 +59,10 @@ QTabBar::tab:hover:!selected {
        <item>
         <widget class="QWidget" name="widget" native="true">
          <layout class="QGridLayout" name="gridLayout_2">
-          <item row="4" column="1">
+          <item row="3" column="1">
            <widget class="QComboBox" name="route_prof"/>
           </item>
-          <item row="3" column="0">
+          <item row="2" column="0">
            <widget class="QLabel" name="label_3">
             <property name="toolTip">
              <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Used as default strategy when resolving outbound/dns server Domain addresses&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
@@ -72,69 +72,45 @@ QTabBar::tab:hover:!selected {
             </property>
            </widget>
           </item>
-          <item row="3" column="1">
-           <widget class="QComboBox" name="default_domain_strategy">
-            <property name="editable">
-             <bool>false</bool>
-            </property>
-           </widget>
-          </item>
-          <item row="1" column="0">
-           <widget class="QLabel" name="label">
-            <property name="toolTip">
-             <string>Sniffs the connections intial packet(s?) to identify the protocol and the SNI. Sniff result for destination also rewrites the destionation of the connection to the sniffed SNI. For more data on the sniffed protocol refer to the sing-box's documentation.</string>
-            </property>
-            <property name="text">
-             <string>Sniffing Mode</string>
-            </property>
-           </widget>
-          </item>
-          <item row="2" column="0">
-           <widget class="QLabel" name="label_6">
-            <property name="toolTip">
-             <string notr="true">&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;If not empty, resolves domains in requests according to the strategy&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-            </property>
-            <property name="text">
-             <string>Resolve Domain Strategy</string>
-            </property>
-           </widget>
-          </item>
           <item row="1" column="1">
-           <widget class="QComboBox" name="sniffing_mode">
-            <item>
-             <property name="text">
-              <string>Disable</string>
-             </property>
-            </item>
-            <item>
-             <property name="text">
-              <string>Sniff result for routing</string>
-             </property>
-            </item>
-           </widget>
-          </item>
-          <item row="4" column="0">
-           <widget class="QLabel" name="route_prof_l">
-            <property name="text">
-             <string>Routing Profile</string>
-            </property>
-           </widget>
-          </item>
-          <item row="2" column="1">
            <widget class="QComboBox" name="domainStrategyCombo">
             <property name="editable">
              <bool>false</bool>
             </property>
            </widget>
           </item>
-          <item row="5" column="0">
+          <item row="2" column="1">
+           <widget class="QComboBox" name="default_domain_strategy">
+            <property name="editable">
+             <bool>false</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="0">
            <widget class="QLabel" name="ruleset_mirror_l">
             <property name="text">
              <string>Remote Rule-set Mirror</string>
             </property>
            </widget>
           </item>
-          <item row="5" column="1">
+          <item row="1" column="0">
+           <widget class="QLabel" name="label_6">
+            <property name="toolTip">
+             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;If not empty, resolves domains in requests according to the strategy&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            </property>
+            <property name="text">
+             <string>Resolve Domain Strategy</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="route_prof_l">
+            <property name="text">
+             <string>Routing Profile</string>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="1">
            <widget class="QComboBox" name="ruleset_mirror">
             <item>
              <property name="text">
@@ -340,6 +316,26 @@ QTabBar::tab:hover:!selected {
           <item row="3" column="1">
            <widget class="QLineEdit" name="warp_public_key"/>
           </item>
+          <item row="7" column="1">
+           <widget class="QPushButton" name="warp_autogen">
+            <property name="toolTip">
+             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Gets a new config from cloudflare API&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            </property>
+            <property name="text">
+             <string>Generate Warp Config</string>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="1">
+           <widget class="QLineEdit" name="warp_reserved"/>
+          </item>
+          <item row="5" column="0">
+           <widget class="QLabel" name="label">
+            <property name="text">
+             <string>Reserved</string>
+            </property>
+           </widget>
+          </item>
           <item row="4" column="0">
            <widget class="QLabel" name="label_12">
             <property name="text">
@@ -349,16 +345,6 @@ QTabBar::tab:hover:!selected {
           </item>
           <item row="4" column="1">
            <widget class="QLineEdit" name="warp_ifc_addrs"/>
-          </item>
-          <item row="5" column="1">
-           <widget class="QPushButton" name="warp_autogen">
-            <property name="toolTip">
-             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Gets a new config from cloudflare API&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-            </property>
-            <property name="text">
-             <string>Generate Warp Config</string>
-            </property>
-           </widget>
           </item>
          </layout>
         </widget>
@@ -687,6 +673,13 @@ For more information, see the document &quot;Configuration/DNS&quot;.</string>
               </widget>
              </item>
              <item>
+              <widget class="QPushButton" name="import_route">
+               <property name="text">
+                <string>Import</string>
+               </property>
+              </widget>
+             </item>
+             <item>
               <widget class="QPushButton" name="edit_route">
                <property name="text">
                 <string>Edit</string>
@@ -697,6 +690,16 @@ For more information, see the document &quot;Configuration/DNS&quot;.</string>
               <widget class="QPushButton" name="delete_route">
                <property name="text">
                 <string>Delete</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="update_route">
+               <property name="toolTip">
+                <string>Update the selected remote routing profile, or all of them</string>
+               </property>
+               <property name="text">
+                <string>Update</string>
                </property>
               </widget>
              </item>
@@ -731,7 +734,6 @@ For more information, see the document &quot;Configuration/DNS&quot;.</string>
  </widget>
  <tabstops>
   <tabstop>tabWidget</tabstop>
-  <tabstop>sniffing_mode</tabstop>
   <tabstop>domainStrategyCombo</tabstop>
   <tabstop>default_domain_strategy</tabstop>
   <tabstop>remote_dns</tabstop>

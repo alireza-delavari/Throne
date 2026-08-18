@@ -7,6 +7,7 @@
 #include <QInputDialog>
 #include <QUrlQuery>
 #include <QJsonDocument>
+#include <QHash>
 
 #include "include/configs/common/utils.h"
 #include "include/database/GroupsRepo.h"
@@ -91,8 +92,21 @@ namespace Subscription {
         }
         if (doc.isArray() && !doc.array().empty()) {
             auto first = doc.array().first();
-            if (first.isObject() && first.toObject().contains("protocol")) {
-                return XraySubType::outboundJsonArray;
+            if (first.isObject()) {
+                auto obj = first.toObject();
+                // Array of bare outbounds (each tagged with "protocol").
+                if (obj.contains("protocol")) return XraySubType::outboundJsonArray;
+                // Array of complete Xray configs (the "Xray JSON subscription"
+                // format): each element carries an "outbounds" array of its own.
+                // Require a "protocol"-tagged outbound so this only matches Xray
+                // configs, not sing-box ones (whose outbounds use "type").
+                if (obj.contains("outbounds")) {
+                    for (const auto &item : obj["outbounds"].toArray()) {
+                        if (item.isObject() && item.toObject().contains("protocol")) {
+                            return XraySubType::configJsonArray;
+                        }
+                    }
+                }
             }
         }
         return XraySubType::invalid;
@@ -170,7 +184,8 @@ namespace Subscription {
                 }
                 return;
             }
-            if (xrayType == XraySubType::outboundInJson || xrayType == XraySubType::outboundJsonArray) {
+            if (xrayType == XraySubType::outboundInJson || xrayType == XraySubType::outboundJsonArray ||
+                xrayType == XraySubType::configJsonArray) {
                 updateXray(doc, xrayType);
                 return;
             }
@@ -234,6 +249,23 @@ namespace Subscription {
             auto link = QUrl(str);
             if (!link.isValid()) return;
             auto dataBytes = DecodeB64IfValid(link.fragment().toUtf8(), QByteArray::Base64UrlEncoding);
+            if (dataBytes.isEmpty()) return;
+            auto data = QJsonDocument::fromJson(dataBytes).object();
+            if (data.isEmpty()) return;
+            if (data.contains("protocol")) {
+                ent = Configs::ProfilesRepo::NewProfile("xray" + data["protocol"].toString());
+            } else {
+                ent = data["type"].toString() == "hysteria2" ? Configs::ProfilesRepo::NewProfile("hysteria") : Configs::ProfilesRepo::NewProfile(data["type"].toString());
+            }
+            if (ent->outbound->invalid) return;
+            ent->outbound->ParseFromJson(data);
+        }
+
+        // throne://add/ deep link
+        if (str.startsWith("throne://add/", Qt::CaseInsensitive)) {
+            auto link = QUrl(str);
+            if (!link.isValid()) return;
+            auto dataBytes = DecodeB64IfValid(link.path().mid(1));
             if (dataBytes.isEmpty()) return;
             auto data = QJsonDocument::fromJson(dataBytes).object();
             if (data.isEmpty()) return;
@@ -315,6 +347,14 @@ namespace Subscription {
         if (str.startsWith("anytls://")) {
             ent = Configs::ProfilesRepo::NewProfile("anytls");
             auto ok = ent->AnyTLS()->ParseFromLink(str);
+            if (!ok) return;
+        }
+
+        // Mieru (mierus:// is the "simple" sharing link; the base64 "standard"
+        // mieru:// link is rejected inside ParseFromLink rather than mis-parsed)
+        if (str.startsWith("mierus://") || str.startsWith("mieru://")) {
+            ent = Configs::ProfilesRepo::NewProfile("mieru");
+            auto ok = ent->Mieru()->ParseFromLink(str);
             if (!ok) return;
         }
 
@@ -464,6 +504,13 @@ namespace Subscription {
                 if (!ok) continue;
             }
 
+            // Mieru
+            if (out["type"] == "mieru") {
+                ent = Configs::ProfilesRepo::NewProfile("mieru");
+                auto ok = ent->Mieru()->ParseFromJson(out);
+                if (!ok) continue;
+            }
+
             // Hysteria
             if (out["type"] == "hysteria" || out["type"] == "hysteria2") {
                 ent = Configs::ProfilesRepo::NewProfile("hysteria");
@@ -528,6 +575,33 @@ namespace Subscription {
 
     void RawUpdater::updateXray(const QJsonDocument &doc, XraySubType type)
     {
+        // "Xray JSON subscription": an array of complete, self-contained Xray
+        // configs. Each element carries its own inbounds/outbounds/routing and
+        // often relies on balancers and dialerProxy chains between its
+        // outbounds, so it can't be flattened into individual proxies without
+        // losing that logic. Import each as a CustomXrayFullConfig — the whole
+        // config runs verbatim as Throne's Xray instance behind a socks bridge.
+        if (type == XraySubType::configJsonArray) {
+            for (const auto &c : doc.array()) {
+                if (!c.isObject()) continue;
+                auto cfg = c.toObject();
+                if (!cfg.contains("outbounds")) continue;
+                // Drop the subscription's own client inbounds (typically socks
+                // 10808 / http 10809). Throne injects its own bridge inbound at
+                // build time and routes everything through it; the bundled
+                // inbounds are never in the traffic path and would only risk
+                // port-bind conflicts. Safe here because none of these configs'
+                // routing rules match on inboundTag.
+                cfg.remove("inbounds");
+                auto ent = Configs::ProfilesRepo::NewProfile("custom");
+                ent->Custom()->type = Configs::Custom::CustomXrayFullConfig;
+                ent->Custom()->config = QJsonObject2QString(cfg, false);
+                if (auto remarks = cfg["remarks"].toString(); !remarks.isEmpty()) ent->Custom()->name = remarks;
+                updated_order += ent;
+            }
+            return;
+        }
+
         QJsonArray outbounds;
         if (type == XraySubType::outboundInJson) {
             outbounds = doc.object()["outbounds"].toArray();
@@ -544,10 +618,25 @@ namespace Subscription {
         }
     }
 
+    // fkYAML picks the input encoding from the first four bytes: a NUL among
+    // them makes it decode the whole document as UTF-16/UTF-32, and those
+    // decoders walk the buffer in fixed strides without an end check, so a body
+    // whose length isn't a multiple of the stride reads out of bounds (#1746).
+    // Well-formed UTF-8 with no NUL byte can match neither a UTF-16/32
+    // signature nor a non-UTF-8 BOM, which pins the parser to its UTF-8 path.
+    // NUL is not a legal YAML stream character anyway, so dropping it here
+    // cannot lose anything a conforming subscription could have sent.
+    std::string sanitizeClashYaml(const QString &str) {
+        QString normalized = str;
+        normalized.remove(QChar(QChar::Null));
+        if (normalized.startsWith(QChar(QChar::ByteOrderMark))) normalized.remove(0, 1);
+        return normalized.toStdString(); // toStdString() == toUtf8(): always well-formed
+    }
+
     void RawUpdater::updateClash(const QString& str)
     {
         try {
-            fkyaml::node node = fkyaml::node::deserialize(str.toStdString());
+            fkyaml::node node = fkyaml::node::deserialize(sanitizeClashYaml(str));
             clash::Clash clash_config = node.get_value<clash::Clash>();
     
             for (const auto& out : clash_config.proxies)
@@ -634,9 +723,18 @@ namespace Subscription {
     
                 updated_order += ent;
             }
-        } catch (const fkyaml::exception &ex) {
+        // Hostile subscription bodies reach the parser here, and it can fail with
+        // more than fkyaml::exception (std::bad_alloc / std::length_error from an
+        // oversized allocation, anything a from_node() overload throws), so catch
+        // broadly rather than letting an import take the app down.
+        } catch (const std::exception &ex) {
+            auto msg = QString::fromUtf8(ex.what());
             runOnUiThread([=] {
-                MessageBoxWarning("YAML Exception", ex.what());
+                MessageBoxWarning("YAML Exception", msg);
+            });
+        } catch (...) {
+            runOnUiThread([] {
+                MessageBoxWarning("YAML Exception", QObject::tr("Failed to parse the Clash configuration."));
             });
         }
     }
@@ -670,7 +768,7 @@ namespace Subscription {
     }
 
     // 在新的 thread 运行
-    void GroupUpdater::AsyncUpdate(const QString &str, int _sub_gid, const std::function<void()> &finish) {
+    void GroupUpdater::AsyncUpdate(const QString &str, int _sub_gid, const std::function<void()> &finish, bool showDiff) {
         auto content = str.trimmed();
         bool asURL = false;
         bool createNewGroup = false;
@@ -703,13 +801,55 @@ namespace Subscription {
                 gid = group->id;
                 MW_dialog_message(MwMessage::SubscriptionNewGroup, {});
             }
-            Update(str, gid, asURL);
+            Update(str, gid, asURL, showDiff);
             emit asyncUpdateCallback(gid);
             if (finish != nullptr) finish();
         });
     }
 
-    void GroupUpdater::Update(const QString &_str, int _sub_gid, bool _not_sub_as_url) {
+    void GroupUpdater::AsyncImportBatch(const QStringList &payloads, const std::function<void()> &finish) {
+        if (payloads.isEmpty()) return;
+
+        runOnNewThread([=,this] {
+            Configs::dataManager->settingsRepo->imported_count = 0;
+            auto rawUpdater = std::make_unique<RawUpdater>();
+
+            MW_show_log(">>>>>>>> " + QObject::tr("Processing subscription data..."));
+            for (const auto &payload: payloads) {
+                rawUpdater->update(payload.trimmed());
+            }
+            Configs::dataManager->profilesRepo->AddProfileBatch(rawUpdater->updated_order, rawUpdater->gid_add_to);
+            MW_show_log(">>>>>>>> " + QObject::tr("Process complete, applying..."));
+
+            Configs::dataManager->settingsRepo->imported_count = rawUpdater->updated_order.count();
+            MW_dialog_message(MwMessage::SubscriptionFinished, {});
+            emit asyncUpdateCallback(rawUpdater->gid_add_to);
+            if (finish != nullptr) finish();
+        });
+    }
+
+    // BatchDeleteProfiles silently keeps the running profile by dropping its id
+    // from the list it was handed; trusting the request duplicates it (#1753).
+    struct DeleteOutcome {
+        bool ok = false;
+        QList<int> deleted;
+        QList<int> kept;
+    };
+
+    DeleteOutcome deleteProfiles(QList<int> ids) {
+        DeleteOutcome outcome;
+        const QSet<int> requested(ids.begin(), ids.end());
+        outcome.ok = Configs::dataManager->profilesRepo->BatchDeleteProfiles(
+            ids, Configs::dataManager->settingsRepo->allow_stopping_active_profile);
+        const QSet<int> deleted(ids.begin(), ids.end());
+        outcome.deleted = std::move(ids);
+        for (int id : requested) {
+            if (!deleted.contains(id)) outcome.kept << id;
+        }
+        return outcome;
+    }
+
+    void GroupUpdater::Update(const QString &_str, int _sub_gid, bool _not_sub_as_url, bool showDiff) {
         // 创建 rawUpdater
         Configs::dataManager->settingsRepo->imported_count = 0;
         auto rawUpdater = std::make_unique<RawUpdater>();
@@ -740,22 +880,52 @@ namespace Subscription {
         }
 
         QList<std::shared_ptr<Configs::Profile>> in;
+        // Profiles the subscription does not own and must never touch. An auto
+        // selector is local state that tracks the group rather than a server the
+        // remote sent us, so leaving it in the diff would report it as removed
+        // on every single refresh and then delete it. Positions are kept so a
+        // refresh does not shuffle the group either.
+        QList<QPair<int, int>> sticky; // (position in the group, profile id)
+        QSet<int> stickyIDs;
+        // Profiles this refresh invalidated: deleted outright, or kept under the
+        // same id with different settings. A running auto selector that built
+        // any of them can no longer trust its config.
+        QList<int> disturbed;
+        // Only a group that really emptied makes "everything below is new" true.
+        bool cleared = false;
 
         if (group != nullptr) {
             group->sub_last_update = QDateTime::currentMSecsSinceEpoch() / 1000;
             group->info = sub_user_info;
             Configs::dataManager->groupsRepo->Save(group);
             //
+            for (int i = 0; i < group->profiles.size(); i++) {
+                auto ent = Configs::dataManager->profilesRepo->GetProfile(group->profiles[i]);
+                if (ent == nullptr || ent->type != "autoselector") continue;
+                sticky << qMakePair(i, group->profiles[i]);
+                stickyIDs.insert(group->profiles[i]);
+            }
             if (Configs::dataManager->settingsRepo->sub_clear) {
                 MW_show_log(QObject::tr("Clearing servers..."));
-                if (!Configs::dataManager->profilesRepo->BatchDeleteProfiles(group->profiles, Configs::dataManager->settingsRepo->allow_stopping_active_profile)) {
+                QList<int> clear_ids;
+                for (int id : group->profiles) {
+                    if (!stickyIDs.contains(id)) clear_ids << id;
+                }
+                const auto outcome = deleteProfiles(clear_ids);
+                if (!outcome.ok) {
                     runOnUiThread([=] {
                         MessageBoxWarning("Internal Error", "DB Error when deleting profiles, Please try again.");
                     });
                     return;
                 }
-            } else {
-                in = Configs::dataManager->profilesRepo->GetProfileBatch(group->Profiles());
+                disturbed = outcome.deleted;
+                // A survivor still belongs to the subscription: fall through to the diff.
+                cleared = outcome.kept.isEmpty();
+            }
+            if (!cleared) {
+                for (const auto &ent : Configs::dataManager->profilesRepo->GetProfileBatch(group->Profiles())) {
+                    if (ent != nullptr && !stickyIDs.contains(ent->id)) in << ent;
+                }
             }
         }
 
@@ -767,11 +937,13 @@ namespace Subscription {
 
         if (group != nullptr) {
             QList<std::shared_ptr<Configs::Profile>> out_all;
-            out_all = Configs::dataManager->profilesRepo->GetProfileBatch(group->Profiles());;
+            for (const auto &ent : Configs::dataManager->profilesRepo->GetProfileBatch(group->Profiles())) {
+                if (ent != nullptr && !stickyIDs.contains(ent->id)) out_all << ent;
+            }
 
             QString change_text;
 
-            if (Configs::dataManager->settingsRepo->sub_clear) {
+            if (cleared) {
                 // all is new profile
                 if (out_all.size() >= 1000) {
                     change_text += "[+] " + Int2String(out_all.size()) + " profiles\n";
@@ -791,8 +963,14 @@ namespace Subscription {
                 Configs::ProfileFilter::OnlyInSrc(in, out, only_in, false);
                 Configs::ProfileFilter::OnlyInSrc(out, in, only_out, false);
                 Configs::ProfileFilter::Common(in, out, update_keep, update_del, false);
+
+                QList<std::shared_ptr<Configs::Profile>> changed_old;
+                QList<std::shared_ptr<Configs::Profile>> changed_new;
+                Configs::ProfileFilter::ChangedByIdentity(only_in, only_out, changed_old, changed_new);
+
                 QString notice_added;
                 QString notice_deleted;
+                QString notice_updated;
                 if (only_out.size() < 1000)
                 {
                     for (const auto &ent: only_out) {
@@ -801,6 +979,15 @@ namespace Subscription {
                 } else
                 {
                     notice_added += QString("[+] ") + "added " + Int2String(only_out.size()) + "\n";
+                }
+                if (changed_new.size() < 1000)
+                {
+                    for (const auto &ent: changed_new) {
+                        notice_updated += "[~] " + ent->outbound->DisplayTypeAndName() + "\n";
+                    }
+                } else
+                {
+                    notice_updated += QString("[~] ") + "updated " + Int2String(changed_new.size()) + "\n";
                 }
                 if (only_in.size() < 1000)
                 {
@@ -813,17 +1000,34 @@ namespace Subscription {
                 }
 
 
+                QHash<Configs::Profile *, int> supersededBy;
+                for (int i = 0; i < update_del.size() && i < update_keep.size(); ++i) {
+                    supersededBy[update_del[i].get()] = update_keep[i]->id;
+                }
+                for (int i = 0; i < changed_new.size(); ++i) {
+                    const auto &oldEnt = changed_old[i];
+                    oldEnt->outbound = changed_new[i]->outbound;
+                    oldEnt->name = oldEnt->outbound->name;
+                    Configs::dataManager->profilesRepo->Save(oldEnt);
+                    supersededBy[changed_new[i].get()] = oldEnt->id;
+                    // Same id, different server: anything already running on it
+                    // is now working from a stale config.
+                    disturbed << oldEnt->id;
+                }
+
                 // sort according to order in remote
+                const auto previousOrder = group->profiles;
                 group->profiles.clear();
                 for (const auto &ent: rawUpdater->updated_order) {
-                    auto deleted_index = update_del.indexOf(ent);
-                    if (deleted_index >= 0) {
-                        if (deleted_index >= update_keep.count()) continue; // should not happen
-                        const auto& ent2 = update_keep[deleted_index];
-                        group->profiles.append(ent2->id);
+                    auto it = supersededBy.find(ent.get());
+                    if (it != supersededBy.end()) {
+                        group->profiles.append(it.value());
                     } else {
                         group->profiles.append(ent->id);
                     }
+                }
+                for (const auto &[position, id] : sticky) {
+                    group->profiles.insert(std::min<qsizetype>(position, group->profiles.size()), id);
                 }
                 Configs::dataManager->groupsRepo->Save(group);
 
@@ -834,21 +1038,56 @@ namespace Subscription {
                         del_ids.append(ent->id);
                     }
                 }
-                if (!Configs::dataManager->profilesRepo->BatchDeleteProfiles(del_ids, Configs::dataManager->settingsRepo->allow_stopping_active_profile)) {
+                const auto outcome = deleteProfiles(del_ids);
+                if (!outcome.ok) {
                     runOnUiThread([=] {
                        MessageBoxWarning("Internal error", "DB Error when deleting profiles, data may be corrupted");
                     });
                 }
+                disturbed << outcome.deleted;
 
-                change_text = "\n" + QObject::tr("Added %1 profiles:\n%2\nDeleted %3 Profiles:\n%4")
+                // Nothing rebuilds group->profiles from the rows; a survivor left
+                // out here is orphaned for good.
+                QString notice_kept;
+                for (int id : outcome.kept) {
+                    if (group->HasProfile(id)) continue;
+                    const auto position = previousOrder.indexOf(id);
+                    group->profiles.insert(position < 0 ? group->profiles.size()
+                                                        : std::min<qsizetype>(position, group->profiles.size()), id);
+                    if (auto ent = Configs::dataManager->profilesRepo->GetProfile(id); ent != nullptr) {
+                        notice_kept += "[=] " + ent->outbound->DisplayTypeAndName() + "\n";
+                    }
+                }
+                if (!outcome.kept.isEmpty()) Configs::dataManager->groupsRepo->Save(group);
+
+                change_text = "\n" + QObject::tr("Added %1 profiles:\n%2\nUpdated %3 profiles:\n%4\nDeleted %5 Profiles:\n%6")
                                          .arg(only_out.length())
                                          .arg(notice_added)
+                                         .arg(changed_old.length())
+                                         .arg(notice_updated)
                                          .arg(only_in.length())
                                          .arg(notice_deleted);
-                if (only_out.length() + only_in.length() == 0) change_text = QObject::tr("Nothing");
+                if (!notice_kept.isEmpty()) {
+                    change_text += "\n" + QObject::tr("Still in use, so kept instead of deleted:\n%1").arg(notice_kept);
+                }
+                if (only_out.length() + only_in.length() + changed_old.length() == 0) change_text = QObject::tr("Nothing");
             }
 
             MW_show_log("<<<<<<<< " + QObject::tr("Change of %1:").arg(group->name) + "\n" + change_text);
+            if (showDiff && Configs::dataManager->settingsRepo->sub_show_change_popup) {
+                // Manual refresh: surface the same diff in a popup, not just the log.
+                const auto diffTitle = QObject::tr("Change of %1").arg(group->name);
+                auto diffBody = change_text.trimmed();
+                if (diffBody.isEmpty()) diffBody = QObject::tr("Nothing");
+                runOnUiThread([diffTitle, diffBody] { MessageBoxScrollable(diffTitle, diffBody); });
+            }
+            // Auto selectors resolve their members from the group at build time,
+            // so a refresh can invalidate one without ever touching the profile
+            // itself. Hand over what changed and let the main window decide
+            // whether a running selector has to be rebuilt.
+            QStringList selectorArgs{Int2String(group->id)};
+            for (int id : disturbed) selectorArgs << Int2String(id);
+            MW_dialog_message(MwMessage::SubscriptionGroupChanged, selectorArgs);
             MW_dialog_message(MwMessage::SubscriptionFinished, {MwArg::Quiet});
         } else {
             Configs::dataManager->settingsRepo->imported_count = rawUpdater->updated_order.count();

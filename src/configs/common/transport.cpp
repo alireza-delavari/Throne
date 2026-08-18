@@ -168,6 +168,13 @@ namespace Configs {
         if (!service_name.isEmpty()) object["service_name"] = service_name;
         return object;
     }
+    QJsonObject Transport::ExportIdentity()
+    {
+        QJsonObject object;
+        if (type.isEmpty() || type == "tcp") return object;
+        object["type"] = type;
+        return object;
+    }
     BuildResult Transport::Build()
     {
         return {ExportToJson(), ""};

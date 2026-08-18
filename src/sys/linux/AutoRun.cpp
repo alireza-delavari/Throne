@@ -83,6 +83,6 @@ bool AutoRun_IsEnabled() {
     return QFile::exists(desktopFileLocation);
 }
 
-void AutoRun_FixPrivilegeIfNeeded() {}
+void AutoRun_FixTaskIfNeeded() {}
 
 void AutoRun_MigrateIfNeeded() {}

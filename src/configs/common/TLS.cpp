@@ -48,6 +48,12 @@ namespace Configs {
         if (!fingerPrint.isEmpty()) object["fingerprint"] = fingerPrint;
         return object;
     }
+    QJsonObject uTLS::ExportIdentity()
+    {
+        QJsonObject object;
+        if (enabled && !fingerPrint.isEmpty()) object["fingerprint"] = fingerPrint;
+        return object;
+    }
     BuildResult uTLS::Build()
     {
         if (!supported) return {};
@@ -104,6 +110,12 @@ namespace Configs {
         if (!serverName.isEmpty()) object["query_server_name"] = serverName;
         return object;
     }
+    QJsonObject ECH::ExportIdentity()
+    {
+        QJsonObject object;
+        if (enabled) object["enabled"] = true;
+        return object;
+    }
     BuildResult ECH::Build()
     {
         return {ExportToJson(), ""};
@@ -157,6 +169,12 @@ namespace Configs {
         if (!short_id.isEmpty()) object["short_id"] = short_id;
         return object;
     }
+    QJsonObject Reality::ExportIdentity()
+    {
+        QJsonObject object;
+        if (enabled) object["enabled"] = true;
+        return object;
+    }
     BuildResult Reality::Build()
     {
         QJsonObject object;
@@ -199,9 +217,12 @@ namespace Configs {
         if (query.hasQueryItem("tls_client_certificate_path")) client_certificate_path = query.queryItemValue("tls_client_certificate_path");
         if (query.hasQueryItem("tls_client_key")) client_key = query.queryItemValue("tls_client_key").split(",");
         if (query.hasQueryItem("tls_client_key_path")) client_key_path = query.queryItemValue("tls_client_key_path");
-        if (query.hasQueryItem("tls_fragment")) fragment = query.queryItemValue("tls_fragment") == "true";
+        if (query.hasQueryItem("tls_fragment")) { fragment = query.queryItemValue("tls_fragment") == "true"; fragment_unspecified = false; }
+        else fragment_unspecified = true;
         if (query.hasQueryItem("tls_fragment_fallback_delay")) fragment_fallback_delay = query.queryItemValue("tls_fragment_fallback_delay");
         if (query.hasQueryItem("tls_record_fragment")) record_fragment = query.queryItemValue("tls_record_fragment") == "true";
+        if (query.hasQueryItem("tls_tricks")) { tls_tricks = query.queryItemValue("tls_tricks") == "true"; tls_tricks_unspecified = false; }
+        else tls_tricks_unspecified = true;
         if (!server_name.isEmpty()) enabled = true;
         ech->ParseFromLink(link);
         utls->ParseFromLink(link);
@@ -245,9 +266,12 @@ namespace Configs {
             client_key = QJsonArray2QListString(object["client_key"].toArray());
         }
         if (object.contains("client_key_path")) client_key_path = object["client_key_path"].toString();
-        if (object.contains("fragment")) fragment = object["fragment"].toBool();
+        if (object.contains("fragment")) { fragment = object["fragment"].toBool(); fragment_unspecified = false; }
+        else fragment_unspecified = true;
         if (object.contains("fragment_fallback_delay")) fragment_fallback_delay = object["fragment_fallback_delay"].toString();
         if (object.contains("record_fragment")) record_fragment = object["record_fragment"].toBool();
+        if (object.contains("tls_tricks")) { tls_tricks = object["tls_tricks"].toObject()["mixedcase_sni"].toBool(); tls_tricks_unspecified = false; }
+        else tls_tricks_unspecified = true;
         if (object.contains("ech")) ech->ParseFromJson(object["ech"].toObject());
         if (object.contains("utls")) utls->ParseFromJson(object["utls"].toObject());
         if (object.contains("reality")) reality->ParseFromJson(object["reality"].toObject());
@@ -291,9 +315,10 @@ namespace Configs {
         if (!client_certificate_path.isEmpty()) query.addQueryItem("tls_client_certificate_path", client_certificate_path);
         if (!client_key.isEmpty()) query.addQueryItem("tls_client_key", client_key.join(","));
         if (!client_key_path.isEmpty()) query.addQueryItem("tls_client_key_path", client_key_path);
-        if (fragment) query.addQueryItem("tls_fragment", "true");
+        if (!fragment_unspecified) query.addQueryItem("tls_fragment", fragment ? "true" : "false");
         if (!fragment_fallback_delay.isEmpty()) query.addQueryItem("tls_fragment_fallback_delay", fragment_fallback_delay);
         if (record_fragment) query.addQueryItem("tls_record_fragment", "true");
+        if (!tls_tricks_unspecified) query.addQueryItem("tls_tricks", tls_tricks ? "true" : "false");
         mergeUrlQuery(query, ech->ExportToLink());
         mergeUrlQuery(query, utls->ExportToLink());
         mergeUrlQuery(query, reality->ExportToLink());
@@ -331,12 +356,27 @@ namespace Configs {
             object["client_key"] = QListStr2QJsonArray(client_key);
         }
         if (!client_key_path.isEmpty()) object["client_key_path"] = client_key_path;
-        if (fragment) object["fragment"] = fragment;
+        // persist the tri-state explicitly so an Off choice survives a round-trip:
+        // true = On, false = Off; the key is omitted only for "Keep Default".
+        if (!fragment_unspecified) object["fragment"] = fragment;
         if (!fragment_fallback_delay.isEmpty()) object["fragment_fallback_delay"] = fragment_fallback_delay;
         if (record_fragment) object["record_fragment"] = record_fragment;
+        if (!tls_tricks_unspecified) object["tls_tricks"] = QJsonObject{{"mixedcase_sni", tls_tricks}};
         if (ech->enabled) object["ech"] = ech->ExportToJson();
         if (utls->enabled) object["utls"] = utls->ExportToJson();
         if (reality->enabled) object["reality"] = reality->ExportToJson();
+        return object;
+    }
+    QJsonObject TLS::ExportIdentity()
+    {
+        QJsonObject object;
+        if (!enabled) return object;
+        object["enabled"] = true;
+        if (disable_sni) object["disable_sni"] = true;
+        if (!server_name.isEmpty()) object["server_name"] = server_name;
+        if (auto o = utls->ExportIdentity(); !o.isEmpty()) object["utls"] = o;
+        if (auto o = ech->ExportIdentity(); !o.isEmpty()) object["ech"] = o;
+        if (auto o = reality->ExportIdentity(); !o.isEmpty()) object["reality"] = o;
         return object;
     }
     BuildResult TLS::Build()
@@ -371,9 +411,15 @@ namespace Configs {
             object["client_key"] = QListStr2QJsonArray(client_key);
         }
         if (!client_key_path.isEmpty()) object["client_key_path"] = client_key_path;
-        if (fragment) object["fragment"] = fragment;
-        if (!fragment_fallback_delay.isEmpty()) object["fragment_fallback_delay"] = fragment_fallback_delay;
+        // hiddify: the built-in fragment implementation emits sing-box's native
+        // tls.fragment here. The custom implementation is emitted at the dialer level
+        // in outbound::Build(), so skip it here when "custom" is selected.
+        if (FragmentEffectivelyOn() && Configs::dataManager->settingsRepo->fragment_implementation != "custom") {
+            object["fragment"] = true;
+            if (!fragment_fallback_delay.isEmpty()) object["fragment_fallback_delay"] = fragment_fallback_delay;
+        }
         if (record_fragment) object["record_fragment"] = record_fragment;
+        if (TlsTricksEffectivelyOn()) object["tls_tricks"] = QJsonObject{{"mixedcase_sni", true}};
         if (auto obj = ech->Build().object;!obj.isEmpty()) object["ech"] = obj;
         if (auto obj = utls->Build().object;!obj.isEmpty()) {
             object["utls"] = obj;
@@ -385,6 +431,20 @@ namespace Configs {
         }
         if (auto obj = reality->Build().object;!obj.isEmpty()) object["reality"] = obj;
         return {object, ""};
+    }
+
+    bool TLS::FragmentEffectivelyOn()
+    {
+        if (fragment) return true;
+        if (fragment_unspecified) return Configs::dataManager->settingsRepo->fragment_default_on;
+        return false;
+    }
+
+    bool TLS::TlsTricksEffectivelyOn()
+    {
+        if (tls_tricks) return true;
+        if (tls_tricks_unspecified) return Configs::dataManager->settingsRepo->tls_tricks_default_on;
+        return false;
     }
 }
 

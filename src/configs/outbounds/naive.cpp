@@ -109,4 +109,9 @@ namespace Configs {
     {
         return "Naive";
     }
+
+    SecurityInfo naive::GetSecurity()
+    {
+        return SecurityFromTLS(quic ? "QUIC" : QString());
+    }
 }

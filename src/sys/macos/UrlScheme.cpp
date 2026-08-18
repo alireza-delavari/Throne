@@ -4,10 +4,11 @@
 #include <QDir>
 #include <QProcess>
 
-// macOS scheme registration is declarative: CFBundleURLTypes in Info.plist plus
-// LaunchServices indexing the bundle. Launching from anywhere normally registers
-// it, but a moved bundle leaves a stale path, so on change we force a re-index of
-// the current location with `lsregister -f`. No file is written here.
+// macOS registration is declarative: CFBundleURLTypes and CFBundleDocumentTypes
+// in Info.plist plus LaunchServices indexing the bundle. Launching from anywhere
+// normally registers it, but a moved bundle leaves a stale path, so on change we
+// force a re-index of the current location with `lsregister -f`. No file is
+// written here.
 
 static const QString kLsregister =
     "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
@@ -22,7 +23,8 @@ static QString bundlePath() {
 }
 
 QString UrlScheme_DesiredState() {
-    return bundlePath();
+    const QString bundle = bundlePath();
+    return bundle.isEmpty() ? QString() : "v2|" + bundle;
 }
 
 void UrlScheme_Apply() {

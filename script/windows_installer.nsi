@@ -14,6 +14,8 @@ SetCompressorDictSize 64
 !include WinVer.nsh
 !include x64.nsh
 
+!define APP_DIR_NAME "Throne"
+
 !define MUI_ICON "res\Throne.ico"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "Welcome to Throne Installer"
@@ -32,6 +34,8 @@ Var RadioJustMe
 Var IsAllUsers
 Var SkipPages
 Var UninstPath
+Var DeleteUserData
+Var CheckDeleteData
 
 ; =====================================
 ; PAGE SEQUENCE
@@ -46,6 +50,7 @@ Page custom InstallModePageCreate InstallModePageLeave
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipPageCheck
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW DirectoryShow
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE DirectoryLeave
+!define MUI_DIRECTORYPAGE_TEXT_TOP "Setup will install Throne in the folder below. If the folder you choose is not named '${APP_DIR_NAME}', Setup creates a '${APP_DIR_NAME}' subfolder inside it, so uninstalling only ever removes Throne's own folder."
 !insertmacro MUI_PAGE_DIRECTORY
 
 !insertmacro MUI_PAGE_INSTFILES
@@ -53,6 +58,7 @@ Page custom InstallModePageCreate InstallModePageLeave
 
 ; Uninstaller pages
 !insertmacro MUI_UNPAGE_CONFIRM
+UninstPage custom un.DataPageCreate un.DataPageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "English"
@@ -77,11 +83,15 @@ Function .onInit
     ReadRegStr $INSTDIR HKCU "Software\Throne" "TempSetupPath"
     DeleteRegValue HKCU "Software\Throne" "TempSetupPath" ; Clean it up immediately
 
+    ${If} $INSTDIR == ""
+      StrCpy $INSTDIR "$PROGRAMFILES64\${APP_DIR_NAME}"
+    ${EndIf}
+
     SetShellVarContext all
   ${Else}
     ; Normal launch. Default to "Just Me" (Current User)
     StrCpy $IsAllUsers "0"
-    StrCpy $INSTDIR "$LOCALAPPDATA\Throne"
+    StrCpy $INSTDIR "$LOCALAPPDATA\${APP_DIR_NAME}"
     SetShellVarContext current
   ${EndIf}
 FunctionEnd
@@ -126,10 +136,10 @@ Function InstallModePageLeave
   ${NSD_GetState} $RadioAllUsers $0
   ${If} $0 == ${BST_CHECKED}
     StrCpy $IsAllUsers "1"
-    StrCpy $INSTDIR "$PROGRAMFILES64\Throne"
+    StrCpy $INSTDIR "$PROGRAMFILES64\${APP_DIR_NAME}"
   ${Else}
     StrCpy $IsAllUsers "0"
-    StrCpy $INSTDIR "$LOCALAPPDATA\Throne"
+    StrCpy $INSTDIR "$LOCALAPPDATA\${APP_DIR_NAME}"
   ${EndIf}
 FunctionEnd
 
@@ -147,7 +157,23 @@ Function DirectoryShow
   ${EndIf}
 FunctionEnd
 
+Function EnsureAppSubfolder
+  ; A hand-typed "D:\Apps\" would otherwise append into "D:\Apps\\Throne".
+  StrCpy $0 $INSTDIR "" -1
+  ${If} $0 == '\'
+    StrCpy $INSTDIR $INSTDIR -1
+  ${EndIf}
+
+  ${GetFileName} "$INSTDIR" $0
+  ${If} $0 != "${APP_DIR_NAME}"
+    StrCpy $INSTDIR "$INSTDIR\${APP_DIR_NAME}"
+  ${EndIf}
+FunctionEnd
+
 Function DirectoryLeave
+  ; Must run before the All Users branch hands the path to the elevated process.
+  Call EnsureAppSubfolder
+
   ${If} $IsAllUsers == "1"
     ; --- ALL USERS LOGIC ---
     UserInfo::GetAccountType
@@ -180,6 +206,7 @@ Function DirectoryLeave
     Goto DoneCheck
 
     AccessDenied:
+      RMDir "$INSTDIR" ; Drop the folder the write test just created (no-op unless empty)
       MessageBox MB_OK|MB_ICONSTOP "You do not have permission to install to '$INSTDIR'.$\n$\nPlease choose a different folder, or select 'Install for anyone using this computer'."
       Abort ; Forces them to stay on the Directory page
 
@@ -248,6 +275,7 @@ SectionEnd
 ; =====================================
 Function un.onInit
   ClearErrors
+  StrCpy $DeleteUserData 1
 
   ; Grab the folder passed via command-line (if we elevated), otherwise use standard folder
   ${GetParameters} $R0
@@ -284,6 +312,39 @@ Function un.onInit
   StrCpy $INSTDIR $UninstPath
 FunctionEnd
 
+; =====================================
+; USER DATA PAGE
+; =====================================
+Function un.DataPageCreate
+  !insertmacro MUI_HEADER_TEXT "Remove Settings" "Choose what to do with your Throne data."
+
+  nsDialogs::Create 1018
+  Pop $0
+
+  ${NSD_CreateLabel} 0 0 100% 24u "Throne keeps its profiles, settings and logs in the installation folder, or under your user profile when that folder is not writable."
+  Pop $0
+
+  ${NSD_CreateCheckbox} 10u 30u 100% 12u "Delete my profiles, settings and logs"
+  Pop $CheckDeleteData
+  ${If} $DeleteUserData == 1
+    SendMessage $CheckDeleteData ${BM_SETCHECK} ${BST_CHECKED} 0
+  ${EndIf}
+
+  ${NSD_CreateLabel} 10u 48u 100% 20u "Clear this if you plan to reinstall Throne later and want to keep them."
+  Pop $0
+
+  nsDialogs::Show
+FunctionEnd
+
+Function un.DataPageLeave
+  ${NSD_GetState} $CheckDeleteData $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $DeleteUserData 1
+  ${Else}
+    StrCpy $DeleteUserData 0
+  ${EndIf}
+FunctionEnd
+
 Section "Uninstall"
   !insertmacro AbortOnRunningApp "$INSTDIR\Throne.exe"
 
@@ -291,9 +352,30 @@ Section "Uninstall"
   Delete "$DESKTOP\Throne.lnk"
   RMDir "$SMPROGRAMS\Throne"
 
-  RMDir /r "$INSTDIR"
+  Delete "$INSTDIR\libcronet.dll"
+  Delete "$INSTDIR\ThroneCore.exe"
+  Delete "$INSTDIR\Throne.exe"
+  Delete "$INSTDIR\updater.exe"
+  Delete "$INSTDIR\updater.old"
+  Delete "$INSTDIR\uninstall.exe"
+
+  ${If} $DeleteUserData == 1
+  ${AndIf} ${FileExists} "$INSTDIR\config\throne.db"
+    RMDir /r "$INSTDIR\config"
+  ${EndIf}
+
+  RMDir "$INSTDIR"
 
   ; Clean up registry!
   DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\Throne"
   DeleteRegKey SHCTX "Software\Throne"
+
+  ; Last, because SHCTX follows the shell var context and an all-users uninstall
+  ; would otherwise resolve $APPDATA to ProgramData.
+  ${If} $DeleteUserData == 1
+    SetShellVarContext current
+    ${If} ${FileExists} "$APPDATA\${APP_DIR_NAME}\*.*"
+      RMDir /r "$APPDATA\${APP_DIR_NAME}"
+    ${EndIf}
+  ${EndIf}
 SectionEnd

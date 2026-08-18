@@ -3,6 +3,9 @@
 #include <QStringList>
 
 namespace Configs {
+    // started_id / remember_id when nothing is selected. Consumers test < 0.
+    constexpr int NoProfileId = -1919;
+
     namespace DomainMatcher {
         enum DomainMatcher {
             DEFAULT,
@@ -18,14 +21,6 @@ namespace Configs {
         inline QStringList SniffProtocols = {"http", "tls", "quic", "stun", "dns", "bittorrent", "dtls", "ssh", "rdp"};
         inline QStringList ActionTypes = {"route", "reject", "hijack-dns", "route-options", "sniff", "resolve"};
         inline QStringList rejectMethods = {"default", "drop", "reply"};
-    }
-
-    namespace SniffingMode {
-        enum SniffingMode {
-            DISABLE,
-            FOR_ROUTING,
-            FOR_DESTINATION,
-        };
     }
 
     namespace CoreType {
@@ -72,10 +67,11 @@ namespace Configs {
 
     namespace Xray {
         inline QStringList XrayLogLevels = {"debug", "info", "warning", "error", "none"};
-        inline QStringList XrayVlessPreferenceString = {"XHTTP Only", "XHTTP And Reality"};
+        inline QStringList XrayVlessPreferenceString = {"XHTTP Only", "XHTTP And Reality", "All VLESS"};
         enum XrayVlessPreference {
             XhttpOnly,
             XhttpAndReality,
+            AllVLESS,
         };
     }
 } // namespace Configs

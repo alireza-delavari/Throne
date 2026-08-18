@@ -5,6 +5,7 @@
 #include <map>
 
 #include "include/database/GroupsRepo.h"
+#include "include/configs/common/OutboundFactory.h"
 #include "include/ui/mainwindow.h"
 
 
@@ -38,32 +39,21 @@ namespace Configs {
             )
         )");
 
+        // When the latency in the row was measured. Lets a consumer decide
+        // whether a stored result is still worth trusting instead of guessing.
+        if (!profilesColumnExists("latency_at"))
+            db.exec("ALTER TABLE profiles ADD COLUMN latency_at INTEGER NOT NULL DEFAULT 0");
+
         db.exec("CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name)");
     }
 
-    QJsonObject ProfilesRepo::profileToJson(const Profile* profile) const {
-        QJsonObject json;
-        
-        // Simple fields
-        json["type"] = profile->type;
-        json["name"] = profile->outbound->name;
-        json["id"] = profile->id;
-        json["gid"] = profile->gid;
-        json["latency"] = profile->latency;
-        json["dl_speed"] = profile->dl_speed;
-        json["ul_speed"] = profile->ul_speed;
-        json["test_country"] = profile->test_country;
-        json["ip_out"] = profile->ip_out;
-        
-        // Complex objects - serialize to JSON strings
-        if (profile->outbound) {
-            json["outbound"] = profile->outbound->ExportToJson();
+    bool ProfilesRepo::profilesColumnExists(const char* columnName) const {
+        auto pragma = db.query("PRAGMA table_info(profiles)");
+        if (!pragma) return false;
+        while (pragma->executeStep()) {
+            if (pragma->getColumn(1).getText() == std::string(columnName)) return true;
         }
-        
-        json["traffic_dl"] = static_cast<qint64>(profile->traffic_downlink);
-        json["traffic_up"] = static_cast<qint64>(profile->traffic_uplink);
-        
-        return json;
+        return false;
     }
 
     std::shared_ptr<Profile> ProfilesRepo::profileFromJson(const QJsonObject& json) const {
@@ -75,6 +65,7 @@ namespace Configs {
         profile->id = json["id"].toInt();
         profile->gid = json["gid"].toInt();
         profile->latency = json["latency"].toInt();
+        profile->latency_at = json["latency_at"].toVariant().toLongLong();
         profile->dl_speed = json["dl_speed"].toString();
         profile->ul_speed = json["ul_speed"].toString();
         profile->test_country = json["test_country"].toString();
@@ -85,56 +76,8 @@ namespace Configs {
         if (type == "hysteria2") {
             type = "hysteria";
         }
-        
-        Configs::outbound* outbound = nullptr;
-        
-        // Create outbound based on type (bean is legacy, not needed)
-        if (type == "socks") {
-            outbound = new Configs::socks();
-        } else if (type == "http") {
-            outbound = new Configs::http();
-        } else if (type == "shadowsocks") {
-            outbound = new Configs::shadowsocks();
-        } else if (type == "chain") {
-            outbound = new Configs::chain();
-        } else if (type == "vmess") {
-            outbound = new Configs::vmess();
-        } else if (type == "trojan") {
-            outbound = new Configs::Trojan();
-        } else if (type == "vless") {
-            outbound = new Configs::vless();
-        } else if (type == "xrayvless") {
-            outbound = new Configs::xrayVless();
-        } else if (type == "hysteria" || type == "hysteria2") {
-            outbound = new Configs::hysteria();
-        } else if (type == "tuic") {
-            outbound = new Configs::tuic();
-        } else if (type == "juicity") {
-            outbound = new Configs::juicity();
-        } else if (type == "trusttunnel") {
-            outbound = new Configs::trusttunnel();
-        } else if (type == "anytls") {
-            outbound = new Configs::anyTLS();
-        } else if (type == "shadowtls") {
-            outbound = new Configs::shadowtls();
-        } else if (type == "wireguard") {
-            outbound = new Configs::wireguard();
-        } else if (type == "tailscale") {
-            outbound = new Configs::tailscale();
-        } else if (type == "ssh") {
-            outbound = new Configs::ssh();
-        } else if (type == "custom") {
-            outbound = new Configs::Custom();
-        } else if (type == "extracore") {
-            outbound = new Configs::extracore();
-        } else if (type == "naive") {
-            outbound = new Configs::naive();
-        } else if (type == "direct") {
-            outbound = new Configs::direct();
-        } else {
-            outbound = new Configs::outbound();
-            outbound->invalid = true;
-        }
+
+        Configs::outbound* outbound = Configs::NewOutboundByType(type);
 
         profile->outbound = std::shared_ptr<Configs::outbound>(outbound);
         
@@ -152,64 +95,41 @@ namespace Configs {
     }
 
     void ProfilesRepo::saveToDatabase(const Profile* profile, int id) const {
-        QJsonObject json = profileToJson(profile);
-        QJsonDocument doc(json);
-        QString jsonStr = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
-        
         QString outboundJson;
         if (profile->outbound) {
             QJsonDocument outboundDoc(profile->outbound->ExportToJson());
             outboundJson = QString::fromUtf8(outboundDoc.toJson(QJsonDocument::Compact));
         }
         QString name = profile->outbound ? profile->outbound->name : QString();
-        const long long traffic_dl = static_cast<long long>(profile->traffic_downlink);
-        const long long traffic_up = static_cast<long long>(profile->traffic_uplink);
-        
-        auto checkQuery = db.query("SELECT id FROM profiles WHERE id = ?", id);
-        bool exists = checkQuery && checkQuery->executeStep();
-        
-        if (exists) {
-            db.exec(R"(
-                UPDATE profiles 
-                SET type = ?, name = ?, gid = ?, latency = ?, dl_speed = ?, ul_speed = ?, 
-                    test_country = ?, ip_out = ?, outbound_json = ?,
-                    traffic_dl = ?, traffic_up = ?, updated_at = strftime('%s', 'now')
-                WHERE id = ?
-            )", 
-                profile->type.toStdString(),
-                name.toStdString(),
-                profile->gid,
-                profile->latency,
-                profile->dl_speed.toStdString(),
-                profile->ul_speed.toStdString(),
-                profile->test_country.toStdString(),
-                profile->ip_out.toStdString(),
-                outboundJson.toStdString(),
-                traffic_dl,
-                traffic_up,
-                id
-            );
-        } else {
-            db.exec(R"(
-                INSERT INTO profiles 
-                (id, type, name, gid, latency, dl_speed, ul_speed, test_country, 
-                ip_out, outbound_json, traffic_dl, traffic_up)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            )",
-                id,
-                profile->type.toStdString(),
-                name.toStdString(),
-                profile->gid,
-                profile->latency,
-                profile->dl_speed.toStdString(),
-                profile->ul_speed.toStdString(),
-                profile->test_country.toStdString(),
-                profile->ip_out.toStdString(),
-                outboundJson.toStdString(),
-                traffic_dl,
-                traffic_up
-            );
-        }
+
+        db.exec(R"(
+            INSERT INTO profiles
+            (id, type, name, gid, latency, latency_at, dl_speed, ul_speed, test_country,
+            ip_out, outbound_json, traffic_dl, traffic_up)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                type = excluded.type, name = excluded.name, gid = excluded.gid,
+                latency = excluded.latency, latency_at = excluded.latency_at,
+                dl_speed = excluded.dl_speed, ul_speed = excluded.ul_speed,
+                test_country = excluded.test_country, ip_out = excluded.ip_out,
+                outbound_json = excluded.outbound_json,
+                traffic_dl = excluded.traffic_dl, traffic_up = excluded.traffic_up,
+                updated_at = strftime('%s', 'now')
+        )",
+            id,
+            profile->type.toStdString(),
+            name.toStdString(),
+            profile->gid,
+            profile->latency,
+            static_cast<long long>(profile->latency_at),
+            profile->dl_speed.toStdString(),
+            profile->ul_speed.toStdString(),
+            profile->test_country.toStdString(),
+            profile->ip_out.toStdString(),
+            outboundJson.toStdString(),
+            static_cast<long long>(profile->traffic_downlink),
+            static_cast<long long>(profile->traffic_uplink)
+        );
     }
 
     ProfileInsertRow ProfilesRepo::profileToInsertRow(const Profile* profile, int id, int gid) const {
@@ -224,6 +144,7 @@ namespace Configs {
         row.name = name.toStdString();
         row.gid = gid;
         row.latency = profile->latency;
+        row.latency_at = static_cast<long long>(profile->latency_at);
         row.dl_speed = profile->dl_speed.toStdString();
         row.ul_speed = profile->ul_speed.toStdString();
         row.test_country = profile->test_country.toStdString();
@@ -241,26 +162,27 @@ namespace Configs {
         json["name"] = QString::fromStdString(stmt.getColumn(2).getText());
         json["gid"] = stmt.getColumn(3).getInt();
         json["latency"] = stmt.getColumn(4).getInt();
-        json["dl_speed"] = QString::fromStdString(stmt.getColumn(5).getText());
-        json["ul_speed"] = QString::fromStdString(stmt.getColumn(6).getText());
-        json["test_country"] = QString::fromStdString(stmt.getColumn(7).getText());
-        json["ip_out"] = QString::fromStdString(stmt.getColumn(8).getText());
-        
-        QString outboundJsonStr = QString::fromStdString(stmt.getColumn(9).getText());
+        json["latency_at"] = static_cast<qint64>(stmt.getColumn(5).getInt64());
+        json["dl_speed"] = QString::fromStdString(stmt.getColumn(6).getText());
+        json["ul_speed"] = QString::fromStdString(stmt.getColumn(7).getText());
+        json["test_country"] = QString::fromStdString(stmt.getColumn(8).getText());
+        json["ip_out"] = QString::fromStdString(stmt.getColumn(9).getText());
+
+        QString outboundJsonStr = QString::fromStdString(stmt.getColumn(10).getText());
         QJsonDocument outboundDoc = QJsonDocument::fromJson(outboundJsonStr.toUtf8());
         if (!outboundDoc.isNull() && outboundDoc.isObject()) {
             json["outbound"] = outboundDoc.object();
         }
-        
-        json["traffic_dl"] = static_cast<qint64>(stmt.getColumn(10).getInt64());
-        json["traffic_up"] = static_cast<qint64>(stmt.getColumn(11).getInt64());
+
+        json["traffic_dl"] = static_cast<qint64>(stmt.getColumn(11).getInt64());
+        json["traffic_up"] = static_cast<qint64>(stmt.getColumn(12).getInt64());
         
         return profileFromJson(json);
     }
 
     std::shared_ptr<Profile> ProfilesRepo::loadFromDatabase(int id) const {
         auto query = db.query(R"(
-            SELECT id, type, name, gid, latency, dl_speed, ul_speed, test_country, 
+            SELECT id, type, name, gid, latency, latency_at, dl_speed, ul_speed, test_country,
                    ip_out, outbound_json, traffic_dl, traffic_up
             FROM profiles WHERE id = ?
         )", id);
@@ -271,55 +193,7 @@ namespace Configs {
     }
 
     std::shared_ptr<Profile> ProfilesRepo::NewProfile(const QString &type) {
-        Configs::outbound *outbound = nullptr;
-        
-        // Create outbound based on type (bean is legacy, not needed)
-        if (type == "socks") {
-            outbound = new Configs::socks();
-        } else if (type == "http") {
-            outbound = new Configs::http();
-        } else if (type == "shadowsocks") {
-            outbound = new Configs::shadowsocks();
-        } else if (type == "chain") {
-            outbound = new Configs::chain();
-        } else if (type == "vmess") {
-            outbound = new Configs::vmess();
-        } else if (type == "trojan") {
-            outbound = new Configs::Trojan();
-        } else if (type == "vless") {
-            outbound = new Configs::vless();
-        } else if (type == "xrayvless") {
-            outbound = new Configs::xrayVless();
-        } else if (type == "hysteria" || type == "hysteria2") {
-            outbound = new Configs::hysteria();
-        } else if (type == "tuic") {
-            outbound = new Configs::tuic();
-        } else if (type == "juicity") {
-            outbound = new Configs::juicity();
-        } else if (type == "trusttunnel") {
-            outbound = new Configs::trusttunnel();
-        } else if (type == "anytls") {
-            outbound = new Configs::anyTLS();
-        } else if (type == "shadowtls") {
-            outbound = new Configs::shadowtls();
-        } else if (type == "wireguard") {
-            outbound = new Configs::wireguard();
-        } else if (type == "tailscale") {
-            outbound = new Configs::tailscale();
-        } else if (type == "ssh") {
-            outbound = new Configs::ssh();
-        } else if (type == "custom") {
-            outbound = new Configs::Custom();
-        } else if (type == "extracore") {
-            outbound = new Configs::extracore();
-        } else if (type == "naive") {
-            outbound = new Configs::naive();
-        } else if (type == "direct") {
-            outbound = new Configs::direct();
-        } else {
-            outbound = new Configs::outbound();
-            outbound->invalid = true;
-        }
+        Configs::outbound* outbound = Configs::NewOutboundByType(type);
 
         // Bean is legacy, pass nullptr
         return std::make_shared<Profile>(outbound, type);
@@ -401,7 +275,7 @@ namespace Configs {
             if (i > 0) idList += ",";
             idList += QString::number(chunkIds[i]);
         }
-        std::string sql = "SELECT id, type, name, gid, latency, dl_speed, ul_speed, test_country, "
+        std::string sql = "SELECT id, type, name, gid, latency, latency_at, dl_speed, ul_speed, test_country, "
                          "ip_out, outbound_json, traffic_dl, traffic_up FROM profiles WHERE id IN (" +
                          idList.toStdString() + ") ORDER BY id";
         auto query = db.query(sql);
@@ -559,6 +433,17 @@ namespace Configs {
         return ids;
     }
 
+    QList<int> ProfilesRepo::GetProfileIdsByType(const QString& type) const {
+        QList<int> ids;
+        auto query = db.query("SELECT id FROM profiles WHERE type = ? ORDER BY id", type.toStdString());
+        if (query) {
+            while (query->executeStep()) {
+                ids.append(query->getColumn(0).getInt());
+            }
+        }
+        return ids;
+    }
+
     int ProfilesRepo::NewProfileID() const {
         // Atomically increment and get the new ID using RETURNING clause (DB atomic, no lock required)
         auto query = db.query("UPDATE entity_ids SET profile_last_id = profile_last_id + 1 RETURNING profile_last_id");
@@ -602,6 +487,28 @@ namespace Configs {
             db.exec("UPDATE profiles SET traffic_dl = ?, traffic_up = ? WHERE id = ?", dl, up, id);
         });
         return true;
+    }
+
+    void ProfilesRepo::SaveTrafficBatch(const QList<std::shared_ptr<Profile>>& profiles) {
+        QList<std::shared_ptr<Profile>> valid;
+        for (const auto& p : profiles) {
+            if (p && p->id >= 0) valid.append(p);
+        }
+        if (valid.isEmpty()) return;
+        QMutexLocker locker(&mutex);
+        try {
+            db.execThrow("BEGIN IMMEDIATE");
+            for (const auto& p : valid) {
+                db.execThrow("UPDATE profiles SET traffic_dl = ?, traffic_up = ? WHERE id = ?",
+                             static_cast<long long>(p->traffic_downlink),
+                             static_cast<long long>(p->traffic_uplink),
+                             p->id);
+            }
+            db.execThrow("COMMIT");
+        } catch (std::exception& e) {
+            try { db.execThrow("ROLLBACK"); } catch (...) {}
+            NotifyError("SaveTrafficBatch", e);
+        }
     }
 
     void ProfilesRepo::SaveBatch(const QList<std::shared_ptr<Profile>>& profiles) {

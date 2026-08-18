@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Form</string>
+   <string notr="true">Form</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
@@ -153,6 +153,15 @@
    </item>
   </layout>
  </widget>
+ <tabstops>
+  <tabstop>socks_address</tabstop>
+  <tabstop>socks_port</tabstop>
+  <tabstop>path_combo</tabstop>
+  <tabstop>path_button</tabstop>
+  <tabstop>no_logs</tabstop>
+  <tabstop>args</tabstop>
+  <tabstop>config</tabstop>
+ </tabstops>
  <resources/>
  <connections/>
 </ui>

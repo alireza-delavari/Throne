@@ -67,7 +67,16 @@ namespace API {
         std::mutex    pending_mu;
         QMap<quint32, std::shared_ptr<PendingCall>> pending;
 
+        std::atomic<bool> connected_{false};
+
         static constexpr int kIOTimeoutMs = 30000;
+
+    public:
+        // Call() status. Anything non-zero is a failed RPC.
+        static constexpr int CallOK = 0;
+        static constexpr int CallNotConnected = -1919;
+
+    private:
 
         // Called on io_thread via readyRead
         void onReadyRead() {
@@ -77,6 +86,7 @@ namespace API {
         }
 
         void wakeAllWithError() {
+            connected_.store(false, std::memory_order_release);
             std::lock_guard<std::mutex> lock(pending_mu);
             for (auto &call : pending) {
                 std::lock_guard<std::mutex> cg(call->mu);
@@ -176,12 +186,13 @@ namespace API {
                     [this]() { wakeAllWithError(); });
                 if (sock->bytesAvailable() > 0) onReadyRead();
             }, Qt::QueuedConnection);
+
+            connected_.store(true, std::memory_order_release);
         }
 
-        // Returns 0 on success, non-zero on failure.
         int Call(const QString &methodName, const std::string &req,
                  std::vector<uint8_t> &rsp, int timeout_ms = 0) {
-            if (!Configs::dataManager->settingsRepo->core_running) return -1919;
+            if (!connected_.load(std::memory_order_acquire)) return CallNotConnected;
 
             const int ms = (timeout_ms > 0) ? timeout_ms : kIOTimeoutMs;
 
@@ -241,8 +252,14 @@ namespace API {
 
             std::lock_guard<std::mutex> g(call->mu);
             if (!ok || call->status != 0) {
-                if (ok && call->status != 0)
+                if (ok && call->status != 0) {
                     MW_show_log("[Core error] " + QString::fromUtf8(call->data));
+                    // Surface the core's error payload to the caller too, so it can be
+                    // inspected instead of just logged (e.g. detecting missing Xray geo
+                    // assets when a Test/IPTest/SpeedTest RPC fails). Callers only read
+                    // `rsp` when the call succeeds, so this is inert for the rest.
+                    rsp.assign(call->data.begin(), call->data.end());
+                }
                 return 1;
             }
             rsp.assign(call->data.begin(), call->data.end());
@@ -283,8 +300,6 @@ namespace API {
         channel->Reconnect(socket);
     }
 
-#define CALL_OK 0
-
 #define NOT_OK      \
     *rpcOK = false; \
     MW_show_log(QString("IPC call failed (code %1)\n").arg(status));
@@ -294,7 +309,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("Start", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return QString::fromStdString(reply.error.value());
         } else {
@@ -309,7 +324,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("Stop", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return QString::fromStdString(reply.error.value());
         } else {
@@ -324,21 +339,23 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("QueryStats", spb::pb::serialize<std::string>(request), resp, 500);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             return reply;
         }
         return {};
     }
 
-    libcore::TestResp Client::Test(bool *rpcOK, const libcore::TestReq &request) {
+    libcore::TestResp Client::Test(bool *rpcOK, const libcore::TestReq &request, QString *coreError) {
         libcore::TestResp reply;
         std::vector<uint8_t> resp;
         auto status = channel->Call("Test", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
         } else {
+            if (coreError && !resp.empty())
+                *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
             NOT_OK
             return {};
         }
@@ -349,7 +366,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("StopTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK) {
+        if (status == LocalSocketChannel::CallOK) {
             *rpcOK = true;
         } else {
             NOT_OK
@@ -363,7 +380,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("QueryURLTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
         } else {
@@ -372,15 +389,17 @@ namespace API {
         }
     }
 
-    libcore::IPTestResp Client::IPTest(bool *rpcOK, const libcore::IPTestRequest &request) {
+    libcore::IPTestResp Client::IPTest(bool *rpcOK, const libcore::IPTestRequest &request, QString *coreError) {
         libcore::IPTestResp reply;
         std::vector<uint8_t> resp;
         auto status = channel->Call("IPTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
         } else {
+            if (coreError && !resp.empty())
+                *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
             NOT_OK
             return {};
         }
@@ -392,7 +411,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("QueryIPTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
         } else {
@@ -401,12 +420,61 @@ namespace API {
         }
     }
 
+    libcore::GetDefaultInterfaceResponse Client::GetDefaultInterface(bool *rpcOK) const {
+        libcore::EmptyReq request;
+        libcore::GetDefaultInterfaceResponse reply;
+        std::vector<uint8_t> resp;
+        auto status = channel->Call("GetDefaultInterface", spb::pb::serialize<std::string>(request), resp);
+
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+            *rpcOK = true;
+            return reply;
+        } else {
+            NOT_OK
+            return {};
+        }
+    }
+
+    libcore::QueryAutoSelectorsResponse Client::QueryAutoSelectors(bool *rpcOK) const {
+        libcore::EmptyReq request;
+        libcore::QueryAutoSelectorsResponse reply;
+        std::vector<uint8_t> resp;
+        auto status = channel->Call("QueryAutoSelectors", spb::pb::serialize<std::string>(request), resp);
+
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+            *rpcOK = true;
+            return reply;
+        } else {
+            NOT_OK
+            return {};
+        }
+    }
+
+    QString Client::AutoSelectorAction(bool *rpcOK, const QString &tag, const QString &action,
+                                       const QString &member) const {
+        libcore::AutoSelectorActionRequest request;
+        request.tag = tag.toStdString();
+        request.action = action.toStdString();
+        request.member = member.toStdString();
+        libcore::ErrorResp reply;
+        std::vector<uint8_t> resp;
+        auto status = channel->Call("AutoSelectorAction", spb::pb::serialize<std::string>(request), resp);
+
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+            *rpcOK = true;
+            return QString::fromStdString(reply.error.value());
+        } else {
+            NOT_OK
+            return "IPC error";
+        }
+    }
+
     QString Client::SetSystemDNS(bool *rpcOK, const bool clear) const {
         libcore::SetSystemDNSRequest request{clear};
         std::vector<uint8_t> resp;
         auto status = channel->Call("SetSystemDNS", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK) {
+        if (status == LocalSocketChannel::CallOK) {
             *rpcOK = true;
             return "";
         } else {
@@ -415,28 +483,36 @@ namespace API {
         }
     }
 
-    libcore::ListConnectionsResp Client::ListConnections() const
+    libcore::QueryConnectionsResp Client::QueryConnections() const
     {
         libcore::EmptyReq request;
-        libcore::ListConnectionsResp reply;
+        libcore::QueryConnectionsResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("ListConnections", spb::pb::serialize<std::string>(request), resp);
+        auto status = channel->Call("QueryConnections", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             return reply;
         }
-        if (status != CALL_OK) MW_show_log("Failed to list connections: IPC error");
+        if (status != LocalSocketChannel::CallOK) MW_show_log("Failed to query connections: IPC error");
         return {};
     }
 
-    QString Client::CheckConfig(bool* rpcOK, const QString& config) const
+    QString Client::CheckConfig(bool* rpcOK, const QString& config, bool isXray) const
     {
-        libcore::LoadConfigReq request{.core_config = config.toStdString()};
+        libcore::LoadConfigReq request;
+        if (isXray)
+        {
+            request.need_xray = true;
+            request.xray_config = config.toStdString();
+        } else
+        {
+            request.core_config = config.toStdString();
+        }
         libcore::ErrorResp reply;
         std::vector<uint8_t> resp;
         auto status = channel->Call("CheckConfig", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply))
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply))
         {
             *rpcOK = true;
             return QString::fromStdString(reply.error.value());
@@ -454,7 +530,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("IsPrivileged", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply))
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply))
         {
             *rpcOK = true;
             return reply.has_privilege.value();
@@ -465,16 +541,18 @@ namespace API {
         }
     }
 
-    libcore::SpeedTestResponse Client::SpeedTest(bool *rpcOK, const libcore::SpeedTestRequest &request)
+    libcore::SpeedTestResponse Client::SpeedTest(bool *rpcOK, const libcore::SpeedTestRequest &request, QString *coreError)
     {
         libcore::SpeedTestResponse reply;
         std::vector<uint8_t> resp;
         auto status = channel->Call("SpeedTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
         } else {
+            if (coreError && !resp.empty())
+                *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
             NOT_OK
             return {};
         }
@@ -487,7 +565,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("QuerySpeedTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
         } else {
@@ -503,7 +581,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("QueryCountryTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
         } else {
@@ -519,7 +597,7 @@ namespace API {
         std::vector<uint8_t> resp;
         auto status = channel->Call("GenWgKeyPair", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == CALL_OK && tryDeserialize(resp, reply)) {
+        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
         } else {

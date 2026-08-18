@@ -47,6 +47,7 @@ namespace Configs
             case GroupSortMethod::ByName:
             case GroupSortMethod::ByTestResult:
             case GroupSortMethod::ByTraffic:
+            case GroupSortMethod::BySecurity:
             case GroupSortMethod::ByType: {
                 auto get_latency_for_sort = [](const std::shared_ptr<Profile>& prof) {
                     auto i = prof->latency;
@@ -69,6 +70,15 @@ namespace Configs
                                       } else if (sortAction.method == GroupSortMethod::ByAddress) {
                                           ms_a = profA->outbound->DisplayAddress();
                                           ms_b = profB->outbound->DisplayAddress();
+                                      } else if (sortAction.method == GroupSortMethod::BySecurity) {
+                                          auto secA = profA->outbound->GetSecurity();
+                                          auto secB = profB->outbound->GetSecurity();
+                                          if (secA.level != secB.level) {
+                                              return sortAction.descending ? secA.level > secB.level
+                                                                           : secA.level < secB.level;
+                                          }
+                                          ms_a = secA.transport + secA.label;
+                                          ms_b = secB.transport + secB.label;
                                       } else if (sortAction.method == GroupSortMethod::ByTestResult) {
                                           if (test_sort_by == testBy::latency) {
                                               return sortAction.descending ? get_latency_for_sort(profA) > get_latency_for_sort(profB) : get_latency_for_sort(profA) < get_latency_for_sort(profB);

@@ -11,7 +11,8 @@ namespace Configs
         QString public_key;
         QString pre_shared_key;
         QList<int> reserved;
-        int persistent_keepalive = 0;
+        // Seconds, or an AmneziaWG 3.0 range such as "22-30".
+        QString persistent_keepalive;
 
         // baseConfig overrides
         bool ParseFromLink(const QString& link) override;
@@ -19,6 +20,9 @@ namespace Configs
         QString ExportToLink() override;
         QJsonObject ExportToJson() override;
         BuildResult Build() override;
+
+        private:
+        void WriteKeepalive(QJsonObject& object) const;
     };
 
     class wireguard : public outbound
@@ -54,6 +58,16 @@ namespace Configs
         QString i4;
         QString i5;
 
+        // AmneziaWG 3.0. header_protection_key is a base64 32-byte key; the
+        // rest are numeric ranges ("30" or "22-30") passed through verbatim.
+        QString header_protection_key;
+        QString content_padding_addition;
+        QString rekey_after_time;
+        QString rekey_timeout;
+        QString reject_after_time;
+        QString keepalive_timeout;
+        QString max_handshake_attempts;
+
         // baseConfig overrides
         bool ParseFromLink(const QString& link) override;
         bool ParseFromJson(const QJsonObject& object) override;
@@ -67,11 +81,13 @@ namespace Configs
         QString GetAddress() override;
         QString DisplayAddress() override;
         QString DisplayType() override;
+        SecurityInfo GetSecurity() override;
         bool IsEndpoint() override;
 
         private:
         QJsonObject AmneziaToJson();
         void AmneziaFromJson(const QJsonObject& object);
+        static QString AmneziaRangeFromJson(const QJsonValue& value);
         void FixAddress();
     };
 }

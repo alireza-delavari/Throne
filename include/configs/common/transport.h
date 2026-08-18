@@ -29,6 +29,7 @@ namespace Configs
         bool ParseFromClash(const clash::Proxies& object) override;
         QString ExportToLink() override;
         QJsonObject ExportToJson() override;
+        QJsonObject ExportIdentity() override;
         BuildResult Build() override;
     };
 }

@@ -4,6 +4,7 @@
 #include <QDir>
 #include "include/global/Configs.hpp"
 #include <QProcess>
+#include <QRegularExpression>
 #include <QSettings>
 
 #include "3rdparty/WinCommander.hpp"
@@ -65,7 +66,8 @@ void enable_autorun() {
         "    <RunOnlyIfIdle>false</RunOnlyIfIdle>\n"
         "    <WakeToRun>false</WakeToRun>\n"
         "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
-        "    <Priority>7</Priority>\n"
+        // Task Scheduler's default of 7 is BELOW_NORMAL_PRIORITY_CLASS, which the core process inherits from us; 4-6 are the interactive band.
+        "    <Priority>5</Priority>\n"
         "  </Settings>\n"
         "  <Actions Context=\"Author\">\n"
         "    <Exec>\n"
@@ -137,7 +139,16 @@ bool AutoRun_IsEnabled() {
     return false;
 }
 
-void AutoRun_FixPrivilegeIfNeeded() {
+// Tasks registered by older versions carry priority 7 (BELOW_NORMAL_PRIORITY_CLASS); a missing element means the
+// same, since that is Task Scheduler's default. A deliberate bump to a higher priority is left alone.
+bool autoRun_priorityIsStale(const QString &xml) {
+    static const QRegularExpression re("<Priority>\\s*(\\d+)\\s*</Priority>");
+    auto match = re.match(xml);
+    if (!match.hasMatch()) return true;
+    return match.captured(1).toInt() > 6;
+}
+
+void AutoRun_FixTaskIfNeeded() {
     QString taskName = GetTaskName();
     QString runLevel = (Configs::IsAdmin() && !Configs::dataManager->settingsRepo->disable_run_admin) ? "HighestAvailable" : "LeastPrivilege";
 
@@ -148,7 +159,8 @@ void AutoRun_FixPrivilegeIfNeeded() {
     if (process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0) {
         QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
         if (!output.contains("xml")) return;
-        if (runLevel == "HighestAvailable" && !output.contains("HighestAvailable") || runLevel == "LeastPrivilege" && output.contains("HighestAvailable")) AutoRun_SetEnabled(true);
+        bool privilegeIsStale = (runLevel == "HighestAvailable" && !output.contains("HighestAvailable")) || (runLevel == "LeastPrivilege" && output.contains("HighestAvailable"));
+        if (privilegeIsStale || autoRun_priorityIsStale(output)) AutoRun_SetEnabled(true);
     }
 }
 

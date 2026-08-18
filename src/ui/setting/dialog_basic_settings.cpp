@@ -26,12 +26,11 @@
 #include <QDir>
 #include <QStandardPaths>
 #include <QCheckBox>
+#include <QScreen>
 #include <QVBoxLayout>
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QPushButton>
-
-
 
 #include "include/ui/mainwindow.h"
 
@@ -45,6 +44,7 @@ DialogBasicSettings::DialogBasicSettings(QWidget *parent)
     ui->log_level->addItems(QString("trace debug info warn error fatal panic").split(" "));
     ui->xray_loglevel->addItems(Configs::Xray::XrayLogLevels);
     ui->mux_protocol->addItems({"h2mux", "smux", "yamux"});
+    ui->fragment_implementation->addItems({"built-in", "custom"});
     ui->disable_stats->setChecked(Configs::dataManager->settingsRepo->disable_traffic_stats);
     ui->proxy_scheme->setCurrentText(Configs::dataManager->settingsRepo->proxy_scheme);
 
@@ -107,6 +107,7 @@ DialogBasicSettings::DialogBasicSettings(QWidget *parent)
 
     // Style
     ui->connection_statistics->setChecked(Configs::dataManager->settingsRepo->enable_stats);
+    ui->disable_traffic_aggregation->setChecked(Configs::dataManager->settingsRepo->disable_traffic_aggregation);
     ui->show_sys_dns->setChecked(Configs::dataManager->settingsRepo->show_system_dns);
     connect(ui->show_sys_dns, &QCheckBox::stateChanged, this, [=]
     {
@@ -118,6 +119,7 @@ DialogBasicSettings::DialogBasicSettings(QWidget *parent)
     //
     D_LOAD_BOOL(start_minimal)
     ui->skip_delete_confirm->setChecked(Configs::dataManager->settingsRepo->skip_delete_confirmation);
+    D_LOAD_BOOL(show_config_security)
     //
     ui->language->setCurrentIndex(Configs::dataManager->settingsRepo->language);
     connect(ui->language, &QComboBox::currentIndexChanged, this, [=,this](int index) {
@@ -147,7 +149,7 @@ DialogBasicSettings::DialogBasicSettings(QWidget *parent)
     ui->theme->addItems(QStyleFactory::keys());
     ui->theme->addItem("QDarkStyle");
     // feiyangqingyun custom stylesheet themes (ported from upstream nekoray)
-    ui->theme->addItems({"FlatGray", "LightBlue", "BlackSoft"});
+    ui->theme->addItems({"FlatGray", "LightBlue", "SoftPink", "BlackSoft"});
     ui->enable_custom_icon->setChecked(Configs::dataManager->settingsRepo->use_custom_icons);
     connect(ui->select_custom_icon, &QPushButton::clicked, this, [=, this] {
         auto n = QMessageBox::information(this, "Custom Icon Manual", tr(Configs::Information::CustomIconManual.toStdString().c_str()), QMessageBox::Open | QMessageBox::Cancel);
@@ -192,11 +194,14 @@ DialogBasicSettings::DialogBasicSettings(QWidget *parent)
     ui->user_agent->setText(Configs::dataManager->settingsRepo->user_agent);
     ui->user_agent->setPlaceholderText(Configs::dataManager->settingsRepo->GetUserAgent(true));
     D_LOAD_BOOL(net_use_proxy)
+    D_LOAD_BOOL(allow_stopping_active_profile)
     D_LOAD_BOOL(sub_clear)
+    D_LOAD_BOOL(sub_show_change_popup)
     D_LOAD_BOOL(net_insecure)
     D_LOAD_BOOL(sub_send_hwid)
     D_LOAD_STRING(sub_custom_hwid_params)
     D_LOAD_INT_ENABLE(sub_auto_update, sub_auto_update_enable)
+    D_LOAD_INT_ENABLE(route_auto_update, route_auto_update_enable)
     auto details = GetDeviceDetails();
 	ui->sub_send_hwid->setToolTip(
         ui->sub_send_hwid->toolTip()
@@ -210,27 +215,59 @@ DialogBasicSettings::DialogBasicSettings(QWidget *parent)
     D_LOAD_COMBO_STRING(mux_protocol)
     D_LOAD_BOOL(mux_padding)
     D_LOAD_BOOL(mux_default_on)
+    D_LOAD_COMBO_STRING(fragment_implementation)
+    D_LOAD_BOOL(fragment_default_on)
+    D_LOAD_BOOL(tls_tricks_default_on)
+    D_LOAD_STRING(fragment_size)
+    D_LOAD_STRING(fragment_sleep)
+    ui->fragment_size->setValidator(new QRegularExpressionValidator(QRegularExpression("^[0-9]+(-[0-9]+)?$"), this));
+    ui->fragment_sleep->setValidator(new QRegularExpressionValidator(QRegularExpression("^[0-9]+(-[0-9]+)?$"), this));
+    // size/sleep only affect the custom implementation, so enable them only for it
+    auto syncFragParams = [this](const QString &impl) {
+        bool custom = impl == "custom";
+        ui->fragment_size->setEnabled(custom);
+        ui->fragment_sleep->setEnabled(custom);
+        ui->fragment_size_l->setEnabled(custom);
+        ui->fragment_sleep_l->setEnabled(custom);
+    };
+    connect(ui->fragment_implementation, &QComboBox::currentTextChanged, this, syncFragParams);
+    syncFragParams(ui->fragment_implementation->currentText());
     ui->dns_in_port->setValidator(new QIntValidator(1, 65535, ui->dns_in_port));
     ui->dns_in_port->setText(Int2String(Configs::dataManager->settingsRepo->core_dns_in_port));
+
+    // Clash API (was behind a "Core Options" popup)
+    ui->core_box_clash_listen_addr->setText(Configs::dataManager->settingsRepo->core_box_clash_listen_addr);
+    ui->core_box_clash_api->setValidator(new QIntValidator(1, 65535, ui->core_box_clash_api));
+    ui->core_box_clash_api->setText(Configs::dataManager->settingsRepo->core_box_clash_api > 0
+                                        ? Int2String(Configs::dataManager->settingsRepo->core_box_clash_api)
+                                        : "");
+    ui->core_box_clash_api_secret->setText(Configs::dataManager->settingsRepo->core_box_clash_api_secret);
 
     // Xray
     ui->xray_mux_concurrency->setText(Int2String(Configs::dataManager->settingsRepo->xray_mux_concurrency));
     ui->xray_default_mux->setChecked(Configs::dataManager->settingsRepo->xray_mux_default_on);
     ui->vless_xray_pref->addItems(Configs::Xray::XrayVlessPreferenceString);
     ui->vless_xray_pref->setCurrentIndex(Configs::dataManager->settingsRepo->xray_vless_preference);
+    D_LOAD_STRING(xray_geoip_url)
+    D_LOAD_STRING(xray_geosite_url)
+    ui->xray_geoip_url->setPlaceholderText("https://github.com/Loyalsoldier/v2ray-rules-dat/raw/release/geoip.dat");
+    ui->xray_geosite_url->setPlaceholderText("https://github.com/Loyalsoldier/v2ray-rules-dat/raw/release/geosite.dat");
 
     // NTP
     ui->ntp_enable->setChecked(Configs::dataManager->settingsRepo->enable_ntp);
     ui->ntp_server->setEnabled(Configs::dataManager->settingsRepo->enable_ntp);
     ui->ntp_port->setEnabled(Configs::dataManager->settingsRepo->enable_ntp);
     ui->ntp_interval->setEnabled(Configs::dataManager->settingsRepo->enable_ntp);
+    ui->ntp_outbound->setEnabled(Configs::dataManager->settingsRepo->enable_ntp);
     ui->ntp_server->setText(Configs::dataManager->settingsRepo->ntp_server_address);
     ui->ntp_port->setText(Int2String(Configs::dataManager->settingsRepo->ntp_server_port));
     ui->ntp_interval->setCurrentText(Configs::dataManager->settingsRepo->ntp_interval);
+    ui->ntp_outbound->setCurrentText(Configs::dataManager->settingsRepo->ntp_outbound);
     connect(ui->ntp_enable, &QCheckBox::stateChanged, this, [=,this](const bool &state) {
         ui->ntp_server->setEnabled(state);
         ui->ntp_port->setEnabled(state);
         ui->ntp_interval->setEnabled(state);
+        ui->ntp_outbound->setEnabled(state);
     });
 
     // Security
@@ -242,6 +279,19 @@ DialogBasicSettings::DialogBasicSettings(QWidget *parent)
 
     D_LOAD_BOOL(skip_cert)
     ui->utlsFingerprint->setCurrentText(Configs::dataManager->settingsRepo->utlsFingerprint);
+
+    // The .ui geometry is a design-time hint only: the size the content actually
+    // needs depends on the platform's font metrics and on the active translation,
+    // and both run larger than what the layout was drawn against. Held at the
+    // designed size, the tab's rows get handed less height than their minimum and
+    // Qt lays them out overlapping each other (#1671). Size to the content
+    // instead, bounded by the screen so the button box stays reachable.
+    QSize want = sizeHint();
+    if (const QScreen *scr = parent ? parent->screen() : screen()) {
+        const QRect avail = scr->availableGeometry();
+        want = want.boundedTo(QSize(avail.width() - 24, avail.height() - 72));
+    }
+    resize(want);
 }
 
 DialogBasicSettings::~DialogBasicSettings() {
@@ -328,12 +378,16 @@ void DialogBasicSettings::accept() {
     // Style
 
     Configs::dataManager->settingsRepo->enable_stats = ui->connection_statistics->isChecked();
+    Configs::dataManager->settingsRepo->disable_traffic_aggregation = ui->disable_traffic_aggregation->isChecked();
     Configs::dataManager->settingsRepo->language = ui->language->currentIndex();
     auto oldUseCustomIcon = Configs::dataManager->settingsRepo->use_custom_icons;
     Configs::dataManager->settingsRepo->use_custom_icons = ui->enable_custom_icon->isChecked();
     if (oldUseCustomIcon != Configs::dataManager->settingsRepo->use_custom_icons) CACHE.updateTrayIcon = true;
     D_SAVE_BOOL(start_minimal)
     Configs::dataManager->settingsRepo->skip_delete_confirmation = ui->skip_delete_confirm->isChecked();
+    bool profileListDisplayChanged =
+        Configs::dataManager->settingsRepo->show_config_security != ui->show_config_security->isChecked();
+    D_SAVE_BOOL(show_config_security)
     Configs::dataManager->settingsRepo->show_system_dns = ui->show_sys_dns->isChecked();
 
     if (Configs::dataManager->settingsRepo->max_log_line <= 0) {
@@ -341,41 +395,51 @@ void DialogBasicSettings::accept() {
     }
 
     // Subscription
-
-    if (ui->sub_auto_update_enable->isChecked()) {
-        TM_auto_update_subsctiption_Reset_Minute(ui->sub_auto_update->text().toInt());
-    } else {
-        TM_auto_update_subsctiption_Reset_Minute(0);
-    }
+    // Intervals are just persisted here; the PeriodicRunner reads them live and is
+    // re-checked from the UpdateSettings handler, so no timer needs restarting.
 
     Configs::dataManager->settingsRepo->user_agent = ui->user_agent->text();
     D_SAVE_BOOL(net_use_proxy)
+    D_SAVE_BOOL(allow_stopping_active_profile)
     D_SAVE_BOOL(sub_clear)
+    D_SAVE_BOOL(sub_show_change_popup)
     D_SAVE_BOOL(net_insecure)
     D_SAVE_BOOL(sub_send_hwid)
     D_SAVE_STRING(sub_custom_hwid_params)
     D_SAVE_INT_ENABLE(sub_auto_update, sub_auto_update_enable)
+    D_SAVE_INT_ENABLE(route_auto_update, route_auto_update_enable)
 
     // Core
     Configs::dataManager->settingsRepo->disable_traffic_stats = ui->disable_stats->isChecked();
     Configs::dataManager->settingsRepo->core_dns_in_port = ui->dns_in_port->text().toInt();
+    Configs::dataManager->settingsRepo->core_box_clash_listen_addr = ui->core_box_clash_listen_addr->text();
+    Configs::dataManager->settingsRepo->core_box_clash_api = ui->core_box_clash_api->text().toInt();
+    Configs::dataManager->settingsRepo->core_box_clash_api_secret = ui->core_box_clash_api_secret->text();
 
     // Xray
     Configs::dataManager->settingsRepo->xray_mux_concurrency = ui->xray_mux_concurrency->text().toInt();
     Configs::dataManager->settingsRepo->xray_mux_default_on = ui->xray_default_mux->isChecked();
     Configs::dataManager->settingsRepo->xray_vless_preference = static_cast<Configs::Xray::XrayVlessPreference>(ui->vless_xray_pref->currentIndex());
+    D_SAVE_STRING(xray_geoip_url)
+    D_SAVE_STRING(xray_geosite_url)
 
     // Mux
     D_SAVE_INT(mux_concurrency)
     D_SAVE_COMBO_STRING(mux_protocol)
     D_SAVE_BOOL(mux_padding)
     D_SAVE_BOOL(mux_default_on)
+    D_SAVE_COMBO_STRING(fragment_implementation)
+    D_SAVE_BOOL(fragment_default_on)
+    D_SAVE_BOOL(tls_tricks_default_on)
+    D_SAVE_STRING(fragment_size)
+    D_SAVE_STRING(fragment_sleep)
 
     // NTP
     Configs::dataManager->settingsRepo->enable_ntp = ui->ntp_enable->isChecked();
     Configs::dataManager->settingsRepo->ntp_server_address = ui->ntp_server->text();
     Configs::dataManager->settingsRepo->ntp_server_port = ui->ntp_port->text().toInt();
     Configs::dataManager->settingsRepo->ntp_interval = ui->ntp_interval->currentText();
+    Configs::dataManager->settingsRepo->ntp_outbound = ui->ntp_outbound->currentText();
 
     // Security
 
@@ -394,6 +458,7 @@ void DialogBasicSettings::accept() {
     if (CACHE.updateMaxLogLines) changes << MwArg::MaxLogLines;
     if (CACHE.updateDisableAdmin) changes << MwArg::DisableAdmin;
     if (needChoosePort) changes << MwArg::ChoosePort;
+    if (profileListDisplayChanged) changes << MwArg::ProfileListDisplay;
     MW_dialog_message(MwMessage::UpdateSettings, changes);
     QDialog::accept();
 }
@@ -425,6 +490,7 @@ static Configs::BackupParts BackupPartsFromMeta(quint32 formatVersion, const QJs
         p.profiles = po["profiles"].toBool() && files.contains("database");
         p.routes = po["routes"].toBool() && files.contains("database");
         p.settings = po["settings"].toBool() && files.contains("database");
+        p.otp = po["otp"].toBool() && files.contains("database");
         p.icons = po["icons"].toBool() && hasIcons;
     } else {
         p.profiles = p.routes = p.settings = files.contains("database");
@@ -433,11 +499,51 @@ static Configs::BackupParts BackupPartsFromMeta(quint32 formatVersion, const QJs
     return p;
 }
 
+void DialogBasicSettings::downloadXrayGeoAsset(const QString &url, const QString &fileName) {
+    const QString effectiveUrl = url.trimmed();
+    if (effectiveUrl.isEmpty()) {
+        QMessageBox::warning(this, tr("Download geo asset"),
+            tr("Please enter a URL for %1 first.").arg(fileName));
+        return;
+    }
+    MW_show_log(tr("Downloading Xray geo asset: %1").arg(fileName));
+    // DownloadAsset drives a blocking event loop and reports progress through the
+    // main window's data view, so it must run off the UI thread. Don't capture the
+    // dialog — it may be closed before the download finishes; report through the
+    // (long-lived) main window instead.
+    runOnNewThread([effectiveUrl, fileName] {
+        const auto err = NetworkRequestHelper::DownloadAsset(effectiveUrl, fileName);
+        runOnUiThread([err, fileName] {
+            if (err.isEmpty()) {
+                MW_show_log(QObject::tr("Downloaded Xray geo asset: %1").arg(fileName));
+                QMessageBox::information(GetMainWindow(), QObject::tr("Download geo asset"),
+                    QObject::tr("%1 was downloaded successfully.").arg(fileName));
+            } else {
+                MessageBoxWarning(QObject::tr("Download geo asset"),
+                    QObject::tr("Failed to download %1:\n%2").arg(fileName, err));
+            }
+        });
+    });
+}
+
+void DialogBasicSettings::on_xray_geoip_download_clicked() {
+    QString url = ui->xray_geoip_url->text().trimmed();
+    if (url.isEmpty()) url = ui->xray_geoip_url->placeholderText();
+    downloadXrayGeoAsset(url, "geoip.dat");
+}
+
+void DialogBasicSettings::on_xray_geosite_download_clicked() {
+    QString url = ui->xray_geosite_url->text().trimmed();
+    if (url.isEmpty()) url = ui->xray_geosite_url->placeholderText();
+    downloadXrayGeoAsset(url, "geosite.dat");
+}
+
 void DialogBasicSettings::on_backup_create_clicked() {
     Configs::BackupParts parts;
     parts.profiles = ui->backup_inc_profiles->isChecked();
     parts.routes = ui->backup_inc_routes->isChecked();
     parts.settings = ui->backup_inc_settings->isChecked();
+    parts.otp = ui->backup_inc_otp->isChecked();
     parts.icons = ui->backup_inc_icons->isChecked();
 
     if (!parts.any()) {
@@ -513,6 +619,7 @@ void DialogBasicSettings::on_backup_create_clicked() {
     partsObj["profiles"] = parts.profiles;
     partsObj["routes"] = parts.routes;
     partsObj["settings"] = parts.settings;
+    partsObj["otp"] = parts.otp;
     partsObj["icons"] = parts.icons;
 
     QJsonObject meta;
@@ -529,6 +636,7 @@ void DialogBasicSettings::on_backup_create_clicked() {
     if (parts.profiles) included << tr("Profiles");
     if (parts.routes) included << tr("Routing profiles");
     if (parts.settings) included << tr("Settings");
+    if (parts.otp) included << tr("OTP profiles");
     if (parts.icons) included << tr("Custom icons");
 
     QMessageBox::information(this, tr("Backup Created"),
@@ -601,19 +709,23 @@ void DialogBasicSettings::on_backup_restore_clicked() {
     auto* cbProfiles = new QCheckBox(tr("Profiles (groups and proxies)"), &dlg);
     auto* cbRoutes = new QCheckBox(tr("Routing profiles"), &dlg);
     auto* cbSettings = new QCheckBox(tr("Settings"), &dlg);
+    auto* cbOtp = new QCheckBox(tr("OTP profiles"), &dlg);
     auto* cbIcons = new QCheckBox(tr("Custom icons"), &dlg);
-    for (auto* cb : {cbProfiles, cbRoutes, cbSettings, cbIcons}) cb->setChecked(true);
+    for (auto* cb : {cbProfiles, cbRoutes, cbSettings, cbOtp, cbIcons}) cb->setChecked(true);
     cbProfiles->setEnabled(avail.profiles);
     cbProfiles->setChecked(avail.profiles);
     cbRoutes->setEnabled(avail.routes);
     cbRoutes->setChecked(avail.routes);
     cbSettings->setEnabled(avail.settings);
     cbSettings->setChecked(avail.settings);
+    cbOtp->setEnabled(avail.otp);
+    cbOtp->setChecked(avail.otp);
     cbIcons->setEnabled(avail.icons);
     cbIcons->setChecked(avail.icons);
     layout->addWidget(cbProfiles);
     layout->addWidget(cbRoutes);
     layout->addWidget(cbSettings);
+    layout->addWidget(cbOtp);
     layout->addWidget(cbIcons);
 
     auto* warn = new QLabel(
@@ -634,6 +746,7 @@ void DialogBasicSettings::on_backup_restore_clicked() {
     chosen.profiles = avail.profiles && cbProfiles->isChecked();
     chosen.routes = avail.routes && cbRoutes->isChecked();
     chosen.settings = avail.settings && cbSettings->isChecked();
+    chosen.otp = avail.otp && cbOtp->isChecked();
     chosen.icons = avail.icons && cbIcons->isChecked();
 
     if (!chosen.any()) {
@@ -692,49 +805,3 @@ void DialogBasicSettings::on_backup_restore_clicked() {
     QDialog::reject();
 }
 
-void DialogBasicSettings::on_core_settings_clicked() {
-    auto w = new QDialog(this);
-    w->setWindowTitle(software_core_name + " Core Options");
-    auto layout = new QGridLayout;
-    w->setLayout(layout);
-    //
-    auto line = -1;
-    MyLineEdit *core_box_clash_api;
-    MyLineEdit *core_box_clash_api_secret;
-    MyLineEdit *core_box_clash_listen_addr;
-    //
-    auto core_box_clash_listen_addr_l = new QLabel("Clash Api Listen Address");
-    core_box_clash_listen_addr = new MyLineEdit;
-    core_box_clash_listen_addr->setText(Configs::dataManager->settingsRepo->core_box_clash_listen_addr);
-    layout->addWidget(core_box_clash_listen_addr_l, ++line, 0);
-    layout->addWidget(core_box_clash_listen_addr, line, 1);
-    //
-    auto core_box_clash_api_l = new QLabel("Clash API Listen Port");
-    core_box_clash_api = new MyLineEdit;
-    core_box_clash_api->setText(Configs::dataManager->settingsRepo->core_box_clash_api > 0 ? Int2String(Configs::dataManager->settingsRepo->core_box_clash_api) : "");
-    layout->addWidget(core_box_clash_api_l, ++line, 0);
-    layout->addWidget(core_box_clash_api, line, 1);
-    //
-    auto core_box_clash_api_secret_l = new QLabel("Clash API Secret");
-    core_box_clash_api_secret = new MyLineEdit;
-    core_box_clash_api_secret->setText(Configs::dataManager->settingsRepo->core_box_clash_api_secret);
-    layout->addWidget(core_box_clash_api_secret_l, ++line, 0);
-    layout->addWidget(core_box_clash_api_secret, line, 1);
-    //
-    auto box = new QDialogButtonBox;
-    box->setOrientation(Qt::Horizontal);
-    box->setStandardButtons(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
-    connect(box, &QDialogButtonBox::accepted, w, [=,this] {
-        Configs::dataManager->settingsRepo->core_box_clash_api = core_box_clash_api->text().toInt();
-        Configs::dataManager->settingsRepo->core_box_clash_listen_addr = core_box_clash_listen_addr->text();
-        Configs::dataManager->settingsRepo->core_box_clash_api_secret = core_box_clash_api_secret->text();
-        MW_dialog_message(MwMessage::UpdateSettings, {});
-        w->accept();
-    });
-    connect(box, &QDialogButtonBox::rejected, w, &QDialog::reject);
-    layout->addWidget(box, ++line, 1);
-    //
-    ADD_ASTERISK(w)
-    w->exec();
-    w->deleteLater();
-}

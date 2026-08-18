@@ -8402,10 +8402,40 @@ private:
     }
 
 private:
+    // THRONE-PATCH (Throne#1746, upstream fktn-k/fkYAML#536): many parser paths
+    // reach back()/pop_back() without first testing empty(). Malformed input can
+    // leave the stack empty at those points (e.g. a mapping key with no open
+    // context), which dereferences an empty deque instead of failing the parse.
+    // Funnelling every access through this wrapper turns those into parse_error.
+    struct context_stack_type : std::deque<parse_context> {
+        using base_type = std::deque<parse_context>;
+
+        parse_context& back() {
+            throw_if_empty();
+            return base_type::back();
+        }
+
+        const parse_context& back() const {
+            throw_if_empty();
+            return base_type::back();
+        }
+
+        void pop_back() {
+            throw_if_empty();
+            base_type::pop_back();
+        }
+
+        void throw_if_empty() const {
+            if FK_YAML_UNLIKELY (base_type::empty()) {
+                throw parse_error("Invalid document structure.", 0, 0);
+            }
+        }
+    };
+
     /// The currently focused YAML node.
     basic_node_type* mp_current_node {nullptr};
     /// The stack of parse contexts.
-    std::deque<parse_context> m_context_stack {};
+    context_stack_type m_context_stack {};
     /// The current depth of flow contexts.
     uint32_t m_flow_context_depth {0};
     /// The set of YAML directives.
@@ -8919,6 +8949,18 @@ private:
 
         IterType current = m_begin;
         std::deque<IterType> cr_itrs {};
+
+        // THRONE-PATCH (Throne#1746, upstream fktn-k/fkYAML#536): the trailing
+        // bytes of a multibyte sequence were read as *++current with no test
+        // against m_end, so a sequence truncated by the end of the input read
+        // out of bounds. Reject it as bad encoding instead.
+        const auto next_byte = [&](uint8_t lead) {
+            if FK_YAML_UNLIKELY (++current == m_end) {
+                throw fkyaml::invalid_encoding("Truncated UTF-8 encoding.", {lead});
+            }
+            return static_cast<uint8_t>(*current);
+        };
+
         while (current != m_end) {
             const auto first = static_cast<uint8_t>(*current);
             const uint32_t num_bytes = utf8::get_num_bytes(first);
@@ -8930,7 +8972,7 @@ private:
                 }
                 break;
             case 2: {
-                const auto second = static_cast<uint8_t>(*++current);
+                const auto second = next_byte(first);
                 const bool is_valid = utf8::validate(first, second);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second});
@@ -8938,8 +8980,8 @@ private:
                 break;
             }
             case 3: {
-                const auto second = static_cast<uint8_t>(*++current);
-                const auto third = static_cast<uint8_t>(*++current);
+                const auto second = next_byte(first);
+                const auto third = next_byte(first);
                 const bool is_valid = utf8::validate(first, second, third);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second, third});
@@ -8947,9 +8989,9 @@ private:
                 break;
             }
             case 4: {
-                const auto second = static_cast<uint8_t>(*++current);
-                const auto third = static_cast<uint8_t>(*++current);
-                const auto fourth = static_cast<uint8_t>(*++current);
+                const auto second = next_byte(first);
+                const auto third = next_byte(first);
+                const auto fourth = next_byte(first);
                 const bool is_valid = utf8::validate(first, second, third, fourth);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second, third, fourth});
@@ -9008,8 +9050,16 @@ private:
         IterType current = m_begin;
         while (current != m_end || encoded_buf_size != 0) {
             while (current != m_end && encoded_buf_size < 2) {
-                auto utf16 = static_cast<char16_t>(static_cast<uint8_t>(*current) << shift_bits[0]);
-                utf16 |= static_cast<char16_t>(static_cast<uint8_t>(*++current) << shift_bits[1]);
+                const auto high = static_cast<uint8_t>(*current);
+                auto utf16 = static_cast<char16_t>(high << shift_bits[0]);
+                // THRONE-PATCH (Throne#1746, upstream fktn-k/fkYAML#536): the low
+                // byte was read as *++current without testing m_end, so an input
+                // whose length is not a multiple of 2 read past the end (and then
+                // incremented a past-the-end iterator).
+                if FK_YAML_UNLIKELY (++current == m_end) {
+                    throw fkyaml::invalid_encoding("Truncated UTF-16 encoding.", {high});
+                }
+                utf16 |= static_cast<char16_t>(static_cast<uint8_t>(*current) << shift_bits[1]);
                 ++current;
 
                 // skip appending CRs.
@@ -9060,14 +9110,20 @@ private:
 
         IterType current = m_begin;
         while (current != m_end) {
-            auto utf32 = static_cast<char32_t>(*current << shift_bits[0]);
-            ++current;
-            utf32 |= static_cast<char32_t>(*current << shift_bits[1]);
-            ++current;
-            utf32 |= static_cast<char32_t>(*current << shift_bits[2]);
-            ++current;
-            utf32 |= static_cast<char32_t>(*current << shift_bits[3]);
-            ++current;
+            // THRONE-PATCH (Throne#1746, upstream fktn-k/fkYAML#536): four bytes
+            // were consumed with a single m_end test, so an input whose length is
+            // not a multiple of 4 read past the end. The chars were also shifted
+            // as signed char, which is UB for bytes >= 0x80.
+            uint32_t utf32_bits = 0;
+            for (int i = 0; i < 4; i++) {
+                if FK_YAML_UNLIKELY (current == m_end) {
+                    throw fkyaml::invalid_encoding("Truncated UTF-32 encoding.", static_cast<char32_t>(utf32_bits));
+                }
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+                utf32_bits |= static_cast<uint32_t>(static_cast<uint8_t>(*current)) << shift_bits[i];
+                ++current;
+            }
+            const auto utf32 = static_cast<char32_t>(utf32_bits);
 
             if FK_YAML_LIKELY (utf32 != char32_t(0x0000000Du)) {
                 utf8::from_utf32(utf32, utf8_buffer, utf8_buf_size);
@@ -9132,6 +9188,17 @@ public:
 
         IterType current = m_begin;
         std::deque<IterType> cr_itrs {};
+
+        // THRONE-PATCH (Throne#1746, upstream fktn-k/fkYAML#536): see the char
+        // adapter above — a multibyte sequence truncated by the end of the input
+        // read out of bounds.
+        const auto next_byte = [&](uint8_t lead) {
+            if FK_YAML_UNLIKELY (++current == m_end) {
+                throw fkyaml::invalid_encoding("Truncated UTF-8 encoding.", {lead});
+            }
+            return static_cast<uint8_t>(*current);
+        };
+
         while (current != m_end) {
             const auto first = static_cast<uint8_t>(*current);
             const uint32_t num_bytes = utf8::get_num_bytes(first);
@@ -9143,7 +9210,7 @@ public:
                 }
                 break;
             case 2: {
-                const auto second = static_cast<uint8_t>(*++current);
+                const auto second = next_byte(first);
                 const bool is_valid = utf8::validate(first, second);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second});
@@ -9151,8 +9218,8 @@ public:
                 break;
             }
             case 3: {
-                const auto second = static_cast<uint8_t>(*++current);
-                const auto third = static_cast<uint8_t>(*++current);
+                const auto second = next_byte(first);
+                const auto third = next_byte(first);
                 const bool is_valid = utf8::validate(first, second, third);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second, third});
@@ -9160,9 +9227,9 @@ public:
                 break;
             }
             case 4: {
-                const auto second = static_cast<uint8_t>(*++current);
-                const auto third = static_cast<uint8_t>(*++current);
-                const auto fourth = static_cast<uint8_t>(*++current);
+                const auto second = next_byte(first);
+                const auto third = next_byte(first);
+                const auto fourth = next_byte(first);
                 const bool is_valid = utf8::validate(first, second, third, fourth);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second, third, fourth});
@@ -9444,6 +9511,17 @@ private:
 
         auto current = m_buffer.begin();
         auto end = m_buffer.end();
+
+        // THRONE-PATCH (Throne#1746, upstream fktn-k/fkYAML#536): see the char
+        // iterator adapter above — a multibyte sequence truncated by the end of
+        // the input read out of bounds.
+        const auto next_byte = [&](uint8_t lead) {
+            if FK_YAML_UNLIKELY (current == end) {
+                throw fkyaml::invalid_encoding("Truncated UTF-8 encoding.", {lead});
+            }
+            return static_cast<uint8_t>(*current++);
+        };
+
         while (current != end) {
             const auto first = static_cast<uint8_t>(*current++);
             const uint32_t num_bytes = utf8::get_num_bytes(first);
@@ -9452,7 +9530,7 @@ private:
             case 1:
                 break;
             case 2: {
-                const auto second = static_cast<uint8_t>(*current++);
+                const auto second = next_byte(first);
                 const bool is_valid = utf8::validate(first, second);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second});
@@ -9460,8 +9538,8 @@ private:
                 break;
             }
             case 3: {
-                const auto second = static_cast<uint8_t>(*current++);
-                const auto third = static_cast<uint8_t>(*current++);
+                const auto second = next_byte(first);
+                const auto third = next_byte(first);
                 const bool is_valid = utf8::validate(first, second, third);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second, third});
@@ -9469,9 +9547,9 @@ private:
                 break;
             }
             case 4: {
-                const auto second = static_cast<uint8_t>(*current++);
-                const auto third = static_cast<uint8_t>(*current++);
-                const auto fourth = static_cast<uint8_t>(*current++);
+                const auto second = next_byte(first);
+                const auto third = next_byte(first);
+                const auto fourth = next_byte(first);
                 const bool is_valid = utf8::validate(first, second, third, fourth);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second, third, fourth});
@@ -9654,6 +9732,17 @@ private:
 
         auto current = m_buffer.begin();
         auto end = m_buffer.end();
+
+        // THRONE-PATCH (Throne#1746, upstream fktn-k/fkYAML#536): see the char
+        // iterator adapter above — a multibyte sequence truncated by the end of
+        // the input read out of bounds.
+        const auto next_byte = [&](uint8_t lead) {
+            if FK_YAML_UNLIKELY (current == end) {
+                throw fkyaml::invalid_encoding("Truncated UTF-8 encoding.", {lead});
+            }
+            return static_cast<uint8_t>(*current++);
+        };
+
         while (current != end) {
             const auto first = static_cast<uint8_t>(*current++);
             const uint32_t num_bytes = utf8::get_num_bytes(first);
@@ -9662,7 +9751,7 @@ private:
             case 1:
                 break;
             case 2: {
-                const auto second = static_cast<uint8_t>(*current++);
+                const auto second = next_byte(first);
                 const bool is_valid = utf8::validate(first, second);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second});
@@ -9670,8 +9759,8 @@ private:
                 break;
             }
             case 3: {
-                const auto second = static_cast<uint8_t>(*current++);
-                const auto third = static_cast<uint8_t>(*current++);
+                const auto second = next_byte(first);
+                const auto third = next_byte(first);
                 const bool is_valid = utf8::validate(first, second, third);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second, third});
@@ -9679,9 +9768,9 @@ private:
                 break;
             }
             case 4: {
-                const auto second = static_cast<uint8_t>(*current++);
-                const auto third = static_cast<uint8_t>(*current++);
-                const auto fourth = static_cast<uint8_t>(*current++);
+                const auto second = next_byte(first);
+                const auto third = next_byte(first);
+                const auto fourth = next_byte(first);
                 const bool is_valid = utf8::validate(first, second, third, fourth);
                 if FK_YAML_UNLIKELY (!is_valid) {
                     throw fkyaml::invalid_encoding("Invalid UTF-8 encoding.", {first, second, third, fourth});

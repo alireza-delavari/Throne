@@ -1,9 +1,11 @@
 #include "include/ui/utils/ProfilesTableView.h"
 #include "include/ui/utils/ProfilesTableVerticalHeader.h"
 #include "include/ui/utils/ProfilesTableFilterHeader.h"
+#include "include/ui/utils/ProfilesFilterProxyModel.h"
 #include "include/ui/utils/ProfilesTableModel.h"
 #include <QDragMoveEvent>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QMimeData>
 
 ProfilesTableView::ProfilesTableView(QWidget *parent)
@@ -23,11 +25,10 @@ ProfilesTableView::ProfilesTableView(QWidget *parent)
 
 void ProfilesTableView::setModel(QAbstractItemModel *model) {
     QTableView::setModel(model);
-    if (auto *pm = qobject_cast<ProfilesTableModel*>(model)) {
-        m_verticalHeader->setProfilesModel(pm);
-    } else {
-        m_verticalHeader->setProfilesModel(nullptr);
-    }
+    m_filterProxy = qobject_cast<ProfilesFilterProxyModel*>(model);
+    auto *pm = m_filterProxy ? m_filterProxy->profilesModel()
+                             : qobject_cast<ProfilesTableModel*>(model);
+    m_verticalHeader->setProfilesModel(pm, m_filterProxy);
 }
 
 int ProfilesTableView::firstVisibleRow() {
@@ -41,6 +42,24 @@ int ProfilesTableView::firstVisibleRow() {
     return startRow;
 }
 
+
+void ProfilesTableView::keyPressEvent(QKeyEvent *event) {
+    // A full viewport leaves no blank area to click, so Escape is the only way to
+    // drop the selection.
+    if (event->key() == Qt::Key_Escape && selectionModel() && selectionModel()->hasSelection()) {
+        clearSelection();
+        selectionModel()->clearCurrentIndex();
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Up && m_filterHeader->filtersVisible()
+        && currentIndex().isValid() && currentIndex().row() == 0) {
+        m_filterHeader->focusLastFilterField();
+        event->accept();
+        return;
+    }
+    QTableView::keyPressEvent(event);
+}
 
 void ProfilesTableView::dragEnterEvent(QDragEnterEvent *event) {
     if (event->mimeData()->hasFormat("application/profile-row-number")) {
@@ -85,6 +104,7 @@ void ProfilesTableView::dropEvent(QDropEvent *event) {
     if (event->source() == this && event->mimeData()->hasFormat("application/profile-row-number")) {
         QByteArray encodedData = event->mimeData()->data("application/profile-row-number");
         QDataStream stream(&encodedData, QIODevice::ReadOnly);
+        // The proxy maps drag indices to the source, so this is a source row.
         int rowNum;
         stream >> rowNum;
 
@@ -100,6 +120,11 @@ void ProfilesTableView::dropEvent(QDropEvent *event) {
             if (indicatorPos == AboveItem) {
                 newRow--;
             }
+        }
+        // The drop target is a view row; bring it into rowNum's space.
+        if (m_filterProxy && newRow >= 0) {
+            newRow = m_filterProxy->toSourceRow(newRow);
+            if (newRow < 0) return;
         }
         rowsSwapped(rowNum, newRow);
         event->accept();

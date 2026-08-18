@@ -122,4 +122,9 @@ namespace Configs {
     {
         return "TUIC";
     }
+
+    SecurityInfo tuic::GetSecurity()
+    {
+        return SecurityFromTLS("QUIC");
+    }
 }

@@ -29,6 +29,9 @@ namespace Configs {
         // Create tables if they don't exist
         void createTables() const;
 
+        // True if the groups table already has the given column (for migrations).
+        bool groupsColumnExists(const char* columnName) const;
+
         // Get next available group ID
         int NewGroupID() const;
     public:
