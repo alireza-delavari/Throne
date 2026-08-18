@@ -343,7 +343,7 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@v8.0.1
         with:
-          name: Throne-${{ github.sha }}-Common-${{ matrix.common }}
+          name: Throne-${{ github.sha }}-Common-${{ matrix.cross_os }}-${{ matrix.cross_arch }}
           path: download-artifact
 
       - name: Install CMake, Ninja, and aqtinstall
