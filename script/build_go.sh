@@ -1,17 +1,28 @@
 #!/bin/bash
-set -e
+# FINAL_UBUNTU20_COMPAT_NO_LINUX_UPDATER_V2
+set -euo pipefail
 
 TAGS="with_clash_api,with_gvisor,with_quic,with_wireguard,with_utls,with_dhcp,with_tailscale,badlinkname,tfogo_checklinkname0"
 
-rm -rf $DEST
-mkdir -p $DEST
+rm -rf "$DEST"
+mkdir -p "$DEST"
 
-[[ "$GOOS" =~ legacy$ ]] && IS_LEGACY=true && GOCMD="$PWD/golang.org/go/bin/go" && GOOS="${GOOS%legacy}" || { IS_LEGACY=false; GOCMD="go"; }
+if [[ "${GOOS}" =~ legacy$ ]]; then
+    IS_LEGACY=true
+    GOCMD="$PWD/golang.org/go/bin/go"
+    GOOS="${GOOS%legacy}"
+else
+    IS_LEGACY=false
+    GOCMD="go"
+fi
 
-if [[ "$GOOS" == "windows" || "$GOOS" == "linux" ]]; then
-    FILE=$([[ "$GOOS" == "windows" ]] && echo "updater-windows-x${GOARCH: -2}.exe" || echo "updater-linux-$GOARCH")
-    curl -fLso "$DEST/updater$([[ "$GOOS" == "windows" ]] && echo ".exe")" "https://github.com/throneproj/updater/releases/latest/download/$FILE"
-    [[ "$GOOS" == "linux" ]] && chmod +x "$DEST/updater"
+# Keep Windows updater behavior for non-Linux workflows.
+# Do not download the official Linux updater here: current upstream Linux updater
+# releases are built against newer glibc and require GLIBC_2.33/GLIBC_2.34, which
+# breaks Ubuntu 20.04 compatibility.
+if [[ "$GOOS" == "windows" ]]; then
+    FILE="updater-windows-x${GOARCH: -2}.exe"
+    curl -fLso "$DEST/updater.exe" "https://github.com/throneproj/updater/releases/latest/download/$FILE"
 fi
 
 case "$GOOS" in
@@ -19,7 +30,7 @@ case "$GOOS" in
     export CGO_ENABLED=0
     if ! $IS_LEGACY; then
       TAGS+=",with_purego,with_naive_outbound"
-      curl -fLso $DEST/libcronet.dll "https://github.com/SagerNet/cronet-go/releases/latest/download/libcronet-windows-$GOARCH.dll"
+      curl -fLso "$DEST/libcronet.dll" "https://github.com/SagerNet/cronet-go/releases/latest/download/libcronet-windows-$GOARCH.dll"
     fi
     ;;
   darwin)
@@ -38,5 +49,5 @@ pushd gen
 protoc -I . --go_out=. --go-grpc_out=. libcore.proto
 popd
 VERSION_SINGBOX=$(go list -m -f '{{.Version}}' github.com/sagernet/sing-box)
-$GOCMD build -v -o $DEST -trimpath -ldflags "-w -s -X 'github.com/sagernet/sing-box/constant.Version=${VERSION_SINGBOX}' -X 'internal/godebug.defaultGODEBUG=multipathtcp=0' -checklinkname=0" -tags "$TAGS"
+$GOCMD build -v -o "$DEST" -trimpath -ldflags "-w -s -X 'github.com/sagernet/sing-box/constant.Version=${VERSION_SINGBOX}' -X 'internal/godebug.defaultGODEBUG=multipathtcp=0' -checklinkname=0" -tags "$TAGS"
 popd
